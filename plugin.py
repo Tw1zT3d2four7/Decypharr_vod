@@ -10,12 +10,14 @@ import threading
 import time
 import urllib.parse
 import urllib.request
+import urllib.error
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from django.db import transaction
-from django.utils import timezone
 from django.http import FileResponse, Http404, HttpResponse, StreamingHttpResponse
 from django.urls import path
+from django.utils import timezone
 
 from apps.m3u.models import M3UAccount
 from apps.vod.models import (
@@ -29,9 +31,15 @@ from apps.vod.models import VODCategory, Movie, Series, Episode, VODLogo
 LOG = logging.getLogger("decypharr_vod")
 PLUGIN_KEY = "decypharr_vod"
 ACCOUNT_NAME = "Decypharr VOD"
-SOURCE_ROOT = "/mnt/decypharr/__all__"
-LIBRARY_ROOT = "/mnt/decypharr_vods"
+SOURCE_ROOT = "/tmp/decypharr_vod_virtual"
+LIBRARY_ROOT = "/data/plugins/decypharr_vod/library"
+DEFAULT_API_URL = "http://192.168.1.11:8282"
 STATE_DIR = "/data/plugins/decypharr_vod"
+API_CACHE_FILE = os.path.join(STATE_DIR, "api_inventory.json")
+API_PAGE_SIZE = 50
+API_WORKERS = 12
+API_TOKEN = ""
+API_BASE_URL = DEFAULT_API_URL
 CACHE_DIR = os.path.join(STATE_DIR, "metadata")
 SECRET_FILE = os.path.join(STATE_DIR, ".secret")
 MARKER = "decypharr_vod"
@@ -124,7 +132,7 @@ def _release_normalize(value):
 
     value = value.replace("_", " ")
     value = value.replace(".", " ")
-    value = re.sub(r"\s+", " ", value)
+    value = re.sub(r"\\s+", " ", value)
     return value.strip()
 
 def _strip_release_group(value):
@@ -536,21 +544,25 @@ def _ffprobe(path, exe):
     if not shutil.which(exe) and not os.path.exists(exe):
         return {"error": "ffprobe not found"}
     try:
-        p = subprocess.run([exe, "-v", "quiet", "-print_format", "json", "-show_format", "-show_streams", path], capture_output=True, text=True, timeout=90)
+        cmd = [exe, "-v", "quiet", "-print_format", "json", "-show_format", "-show_streams"]
+        if str(path).startswith(("http://", "https://")) and API_TOKEN:
+            cmd += ["-headers", "Authorization: Bearer %s\r\n" % API_TOKEN]
+        cmd.append(path)
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
         if p.returncode:
             return {"error": p.stderr[-500:]}
         raw = json.loads(p.stdout or "{}")
         streams = raw.get("streams", [])
         videos, audios, subs = [], [], []
-        for s in streams:
-            x = {"index": s.get("index"), "codec": s.get("codec_name"), "language": (s.get("tags") or {}).get("language"), "title": (s.get("tags") or {}).get("title")}
-            if s.get("codec_type") == "video":
-                x.update({"width": s.get("width"), "height": s.get("height"), "fps": s.get("r_frame_rate"), "pix_fmt": s.get("pix_fmt"), "hdr": s.get("color_transfer"), "profile": s.get("profile")})
+        for st in streams:
+            x = {"index": st.get("index"), "codec": st.get("codec_name"), "language": (st.get("tags") or {}).get("language"), "title": (st.get("tags") or {}).get("title")}
+            if st.get("codec_type") == "video":
+                x.update({"width": st.get("width"), "height": st.get("height"), "fps": st.get("r_frame_rate"), "pix_fmt": st.get("pix_fmt"), "hdr": st.get("color_transfer"), "profile": st.get("profile")})
                 videos.append(x)
-            elif s.get("codec_type") == "audio":
-                x.update({"channels": s.get("channels"), "sample_rate": s.get("sample_rate"), "bitrate": s.get("bit_rate")})
+            elif st.get("codec_type") == "audio":
+                x.update({"channels": st.get("channels"), "sample_rate": st.get("sample_rate"), "bitrate": st.get("bit_rate")})
                 audios.append(x)
-            elif s.get("codec_type") == "subtitle":
+            elif st.get("codec_type") == "subtitle":
                 subs.append(x)
         return {"duration": float((raw.get("format") or {}).get("duration") or 0), "bitrate": int((raw.get("format") or {}).get("bit_rate") or 0), "format": (raw.get("format") or {}).get("format_name"), "video": videos, "audio": audios, "subtitles": subs}
     except Exception as e:
@@ -597,51 +609,53 @@ def _play(kind, rel, ext):
     return "http://127.0.0.1:9191/decypharr-vod/%s/%s/%s.%s" % (_get_secret(), kind, rel, ext.lstrip("."))
 
 
+def _proxy_api_file(request, api_url):
+    headers = {"Authorization": "Bearer %s" % API_TOKEN, "User-Agent": "Dispatcharr-Decypharr-VOD/0.4.7"}
+    rng = request.headers.get("Range")
+    if rng:
+        headers["Range"] = rng
+    req = urllib.request.Request(api_url, headers=headers)
+    try:
+        upstream = urllib.request.urlopen(req, timeout=30)
+    except urllib.error.HTTPError as e:
+        return HttpResponse(status=e.code)
+    except Exception as e:
+        LOG.exception("Decypharr playback request failed: %s", e)
+        return HttpResponse(status=502)
+
+    status = getattr(upstream, "status", 200)
+    content_type = upstream.headers.get("Content-Type") or "application/octet-stream"
+
+    def chunks():
+        try:
+            while True:
+                data = upstream.read(1024 * 1024)
+                if not data:
+                    break
+                yield data
+        finally:
+            upstream.close()
+
+    response = StreamingHttpResponse(chunks(), status=status, content_type=content_type)
+    for name in ("Content-Length", "Content-Range", "Accept-Ranges", "Content-Disposition", "ETag", "Last-Modified"):
+        value = upstream.headers.get(name)
+        if value:
+            response[name] = value
+    response["Accept-Ranges"] = upstream.headers.get("Accept-Ranges", "bytes")
+    return response
+
+
 def _stream_file(request, kind, rid):
     Model = M3UMovieRelation if kind == "movie" else M3UEpisodeRelation
     try:
         rel = Model.objects.select_related("m3u_account").get(id=int(rid), m3u_account__name=ACCOUNT_NAME)
     except Exception:
         raise Http404
-    path = (rel.custom_properties or {}).get("decypharr_path")
-    if not path:
+    props = rel.custom_properties or {}
+    api_url = props.get("decypharr_api_url")
+    if not api_url:
         raise Http404
-    path = os.path.realpath(path)
-    if not os.path.isfile(path):
-        raise Http404
-    size = os.path.getsize(path)
-    rng = request.headers.get("Range")
-    if not rng:
-        resp = FileResponse(open(path, "rb"), content_type=mimetypes.guess_type(path)[0] or "application/octet-stream")
-        resp["Content-Length"] = str(size)
-        return resp
-    m = re.match(r"bytes=(\d*)-(\d*)", rng)
-    if not m:
-        return HttpResponse(status=416)
-    start = int(m.group(1) or 0)
-    end = int(m.group(2) or size - 1)
-    end = min(end, size - 1)
-    if start > end or start >= size:
-        return HttpResponse(status=416)
-    length = end - start + 1
-    f = open(path, "rb")
-    f.seek(start)
-    def chunks():
-        left = length
-        try:
-            while left:
-                b = f.read(min(1024 * 1024, left))
-                if not b:
-                    break
-                left -= len(b)
-                yield b
-        finally:
-            f.close()
-    r = StreamingHttpResponse(chunks(), status=206, content_type=mimetypes.guess_type(path)[0] or "application/octet-stream")
-    r["Content-Range"] = "bytes %d-%d/%d" % (start, end, size)
-    r["Content-Length"] = str(length)
-    r["Accept-Ranges"] = "bytes"
-    return r
+    return _proxy_api_file(request, api_url)
 
 
 def _install_route():
@@ -689,7 +703,7 @@ def _account():
     a = M3UAccount.objects.filter(name=ACCOUNT_NAME).first()
     if a:
         return a
-    a = M3UAccount.objects.create(name=ACCOUNT_NAME, account_type=M3UAccount.Types.XC, server_url="http://127.0.0.1", username="decypharr", password="disabled", file_path=SOURCE_ROOT, is_active=False, priority=10000, max_streams=0, user_agent="Dispatcharr-Decypharr-VOD", custom_properties={MARKER: True})
+    a = M3UAccount.objects.create(name=ACCOUNT_NAME, account_type=M3UAccount.Types.XC, server_url="http://127.0.0.1", username="decypharr", password="disabled", file_path=LIBRARY_ROOT, is_active=False, priority=10000, max_streams=0, user_agent="Dispatcharr-Decypharr-VOD", custom_properties={MARKER: True})
     return a
 
 
@@ -1120,122 +1134,188 @@ def _tv_blu_ray_episode_candidates(files):
     return [f for _, f in numbered]
 
 
-def _discover_media(root):
-    """Discover logical media objects instead of raw source files.
+def _api_json(url, token, params=None, timeout=30):
+    q = urllib.parse.urlencode(params or {})
+    full = url + (("&" if "?" in url else "?") + q if q else "")
+    req = urllib.request.Request(full, headers={"Authorization": "Bearer %s" % token, "Accept": "application/json", "User-Agent": "Dispatcharr-Decypharr-VOD/0.4.7"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read().decode("utf-8"))
 
-    Returns dictionaries of the form:
 
-        {
-            "kind": "movie" | "episode",
-            "path": source_path,
-            "episode": (season, number) | None,
-        }
+def _api_items(payload):
+    if isinstance(payload, list):
+        return payload
+    if not isinstance(payload, dict):
+        return []
+    for key in ("items", "entries", "results", "files", "torrents", "data"):
+        value = payload.get(key)
+        if isinstance(value, list):
+            return value
+        if isinstance(value, dict):
+            nested = _api_items(value)
+            if nested:
+                return nested
+    return []
 
-    Release directories are treated as media identities for Blu-ray
-    structures. Individual M2TS files are never independently scanned as
-    movies.
-    """
-    root = os.path.realpath(root)
 
-    release_files = {}
-    direct_files = []
+def _api_has_more(payload, page, count):
+    if not isinstance(payload, dict):
+        return count >= API_PAGE_SIZE
+    total_pages = payload.get("total_pages") or payload.get("pages")
+    if total_pages is not None:
+        try: return page < int(total_pages)
+        except Exception: pass
+    total = payload.get("total") or payload.get("count")
+    if total is not None:
+        try: return page * API_PAGE_SIZE < int(total)
+        except Exception: pass
+    return count >= API_PAGE_SIZE
 
-    for base, dirs, files in os.walk(root):
-        for fn in files:
-            p = os.path.realpath(os.path.join(base, fn))
 
-            try:
-                ext = Path(fn).suffix.lower()
-            except Exception:
-                continue
+def _api_paginated(url, token):
+    all_items = []
+    page = 1
+    while True:
+        payload = _api_json(url, token, {"page": page, "page_size": API_PAGE_SIZE})
+        items = _api_items(payload)
+        if not items:
+            break
+        all_items.extend(items)
+        if not _api_has_more(payload, page, len(items)):
+            break
+        page += 1
+        if page > 10000:
+            raise RuntimeError("Decypharr pagination exceeded safety limit")
+    return all_items
 
-            if ext not in VIDEO_EXTS:
-                continue
 
-            if not os.path.isfile(p):
-                continue
+def _api_torrent_id(entry):
+    if not isinstance(entry, dict): return ""
+    return str(entry.get("info_hash") or entry.get("hash") or entry.get("torrent") or entry.get("id") or "")
 
-            release = str(_release_root(p, root))
 
-            release_files.setdefault(release, []).append(p)
+def _api_file_name(entry):
+    if not isinstance(entry, dict): return ""
+    return str(entry.get("name") or entry.get("filename") or entry.get("file") or entry.get("path") or "")
+
+
+def _api_file_path(entry):
+    if not isinstance(entry, dict): return ""
+    return str(entry.get("api_path") or entry.get("download_path") or entry.get("path") or entry.get("url") or entry.get("file") or "")
+
+
+def _api_release_name(entry):
+    if not isinstance(entry, dict): return ""
+    return str(entry.get("name") or entry.get("title") or entry.get("torrent_name") or entry.get("path") or "")
+
+
+def _api_download_url(base, torrent, file_path):
+    torrent_q = urllib.parse.quote(str(torrent), safe="")
+    file_q = urllib.parse.quote(str(file_path).lstrip("/"), safe="/")
+    return base.rstrip("/") + "/api/browse/download/%s/%s" % (torrent_q, file_q)
+
+
+def _api_inventory_load():
+    try:
+        with open(API_CACHE_FILE, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {"releases": {}, "files": {}}
+
+
+def _api_inventory_save(state):
+    os.makedirs(STATE_DIR, exist_ok=True)
+    tmp = API_CACHE_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(state, f, ensure_ascii=False)
+    os.replace(tmp, API_CACHE_FILE)
+
+
+def _api_child_files(base, token, release):
+    release_path = _api_file_path(release)
+    if not release_path:
+        return []
+
+    url = base.rstrip("/") + "/api/browse" + release_path
+    return _api_paginated(url, token)
+
+
+def _discover_media(root, api_url=None, api_token=None):
+    if not api_url or not api_token:
+        return []
+
+    state = _api_inventory_load()
+    cached_files = state.get("files") or {}
+    releases = _api_paginated(api_url.rstrip("/") + "/api/browse/__all__", api_token)
+    current = {}
+    cached_meta = state.get("release_meta") or {}
+
+    def signature(release):
+        if not isinstance(release, dict):
+            return ""
+        keys = ("updated_at", "modified_at", "mtime", "size", "file_count", "files_count", "name", "path")
+        return json.dumps({k: release.get(k) for k in keys if k in release}, sort_keys=True, default=str)
+
+    def fetch(release):
+        h = _api_torrent_id(release)
+        if not h:
+            return None, []
+        try:
+            return h, _api_child_files(api_url, api_token, release)
+        except Exception:
+            LOG.exception("Failed reading Decypharr release %s", h)
+            return h, []
+
+    # Reuse child inventories when the release entry is unchanged. New or
+    # changed releases are fetched in parallel, avoiding thousands of child
+    # API requests on every scan.
+    missing = []
+    for release in releases:
+        h = _api_torrent_id(release)
+        if not h:
+            continue
+        current[h] = release
+        sig = signature(release)
+        if h not in cached_files or cached_meta.get(h) != sig:
+            missing.append(release)
+            cached_meta[h] = sig
+
+    if missing:
+        with ThreadPoolExecutor(max_workers=API_WORKERS) as pool:
+            futures = [pool.submit(fetch, release) for release in missing]
+            for future in as_completed(futures):
+                h, files = future.result()
+                if h:
+                    cached_files[h] = files
+
+    # Remove deleted releases from the persistent inventory.
+    cached_files = {h: files for h, files in cached_files.items() if h in current}
+    cached_meta = {h: meta for h, meta in cached_meta.items() if h in current}
+    state["files"] = cached_files
+    state["releases"] = current
+    state["release_meta"] = cached_meta
+    _api_inventory_save(state)
 
     discovered = []
+    virtual_root = os.path.realpath(root)
+    os.makedirs(virtual_root, exist_ok=True)
 
-    for release, files in sorted(release_files.items()):
-        has_m2ts = any(Path(f).suffix.lower() == ".m2ts" for f in files)
-
-        # --------------------------------------------------------
-        # Blu-ray / M2TS release handling
-        # --------------------------------------------------------
-        if has_m2ts and _is_blu_ray_release(release, files):
-            tv = _is_tv_release(release, files)
-
-            if tv:
-                season = _release_season(release)
-
-                # If the release itself supplies a season and the files are
-                # numbered internal streams, map them sequentially.
-                candidates = _tv_blu_ray_episode_candidates(files)
-
-                if season and candidates:
-                    for number, source in enumerate(candidates, start=1):
-                        discovered.append({
-                            "kind": "episode",
-                            "path": source,
-                            "episode": (season, number),
-                        })
-
-                # Also preserve any explicitly episode-labelled files that
-                # may coexist with the Blu-ray streams.
-                for source in sorted(files):
-                    if not os.path.isfile(source):
-                        continue
-                    epi = _episode(source)
-                    if epi and source not in {x["path"] for x in discovered}:
-                        discovered.append({
-                            "kind": "episode",
-                            "path": source,
-                            "episode": epi,
-                        })
-
-            else:
-                source = _movie_source_for_release(files)
-
-                # No usable main feature means this release is incomplete
-                # or consists only of samples/menus. Skip it safely.
-                if source:
-                    discovered.append({
-                        "kind": "movie",
-                        "path": source,
-                        "episode": None,
-                    })
-
-            continue
-
-        # --------------------------------------------------------
-        # Normal non-Blu-ray media
-        # --------------------------------------------------------
-        for source in sorted(files):
-            if _internal_stream_name(source):
-                # Internal numeric/BMDV stream names without a Blu-ray
-                # release context must never become standalone movies.
-                if Path(source).suffix.lower() == ".m2ts":
-                    continue
-
-            epi = _episode(source)
-
-            if epi:
-                discovered.append({
-                    "kind": "episode",
-                    "path": source,
-                    "episode": epi,
-                })
-            else:
-                discovered.append({
-                    "kind": "movie",
-                    "path": source,
-                    "episode": None,
-                })
+    for h, release in current.items():
+        release_name = _api_release_name(release) or h
+        files = cached_files.get(h) or []
+        for child in files:
+            name = _api_file_name(child)
+            if not name:
+                continue
+            ext = Path(name).suffix.lower()
+            if ext not in VIDEO_EXTS:
+                continue
+            file_path = _api_file_path(child) or name
+            api_path = file_path if file_path.startswith("http") else _api_download_url(api_url, h, file_path)
+            safe_release = _safe(release_name) or h
+            virtual = os.path.join(virtual_root, safe_release, os.path.basename(name))
+            epi = _episode(name)
+            discovered.append({"kind": "episode" if epi else "movie", "path": virtual, "api_url": api_path, "episode": epi, "info_hash": h, "file_path": file_path, "release_name": release_name, "file_name": name})
 
     return discovered
 
@@ -1487,8 +1567,11 @@ def _scan(plugin):
 
     try:
         settings = getattr(plugin, "_settings", {}) or {}
+        global API_TOKEN, API_BASE_URL
+        API_BASE_URL = (settings.get("api_url") or DEFAULT_API_URL).rstrip("/")
+        API_TOKEN = settings.get("api_token") or ""
         cfg = {
-            "root": settings.get("root_path") or SOURCE_ROOT,
+            "root": SOURCE_ROOT,
             "library": settings.get("library_root") or LIBRARY_ROOT,
             "tmdb_key": settings.get("tmdb_api_key") or "",
             "metadata": settings.get("metadata_enabled", True),
@@ -1497,12 +1580,10 @@ def _scan(plugin):
         root = cfg["root"]
         lib = cfg["library"]
 
-        if not os.path.isdir(root):
-            return {
-                "status": "error",
-                "message": "Decypharr root not found: %s" % root,
-            }
+        if not API_TOKEN:
+            return {"status": "error", "message": "Decypharr API token is required."}
 
+        os.makedirs(root, exist_ok=True)
         os.makedirs(lib, exist_ok=True)
 
         account = _account()
@@ -1520,7 +1601,7 @@ def _scan(plugin):
             "skipped": 0,
         }
 
-        media = _discover_media(root)
+        media = _discover_media(root, API_BASE_URL, API_TOKEN)
         media = _dedupe_discovered_media(media)
 
         LOG.info(
@@ -1530,8 +1611,9 @@ def _scan(plugin):
 
         for item in media:
             p = item["path"]
+            api_media_url = item.get("api_url")
 
-            if not os.path.isfile(p):
+            if not api_media_url:
                 counts["skipped"] += 1
                 continue
 
@@ -1546,14 +1628,7 @@ def _scan(plugin):
 
                     release = _release_root(p, root)
 
-                    try:
-                        release_files = [
-                            os.path.realpath(os.path.join(str(release), fn))
-                            for fn in os.listdir(str(release))
-                            if os.path.isfile(os.path.join(str(release), fn))
-                        ]
-                    except OSError:
-                        release_files = []
+                    release_files = []
 
                     # Always derive the initial candidate from the
                     # source path.  _series_title_from_path() handles
@@ -1606,7 +1681,11 @@ def _scan(plugin):
                     rel.custom_properties = dict(rel.custom_properties or {})
                     rel.custom_properties.update({
                         MARKER: True,
-                        "decypharr_path": p, "episodes_fetched": True, "detailed_fetched": True,
+                        "decypharr_path": p,
+                        "decypharr_api_url": api_media_url,
+                        "decypharr_info_hash": item.get("info_hash"),
+                        "decypharr_file_path": item.get("file_path"),
+                        "episodes_fetched": True, "detailed_fetched": True,
                     })
                     rel.last_episode_refresh = timezone.now()
                     rel.save()
@@ -1661,10 +1740,14 @@ def _scan(plugin):
                     ec = dict(ep.custom_properties or {})
                     ec[MARKER] = True
 
-                    probe = _ffprobe(p, cfg["ffprobe"])
+                    probe = _ffprobe(api_media_url, cfg["ffprobe"])
 
                     ec.update({
-                        "decypharr_path": p, "episodes_fetched": True, "detailed_fetched": True,
+                        "decypharr_path": p,
+                        "decypharr_api_url": api_media_url,
+                        "decypharr_info_hash": item.get("info_hash"),
+                        "decypharr_file_path": item.get("file_path"),
+                        "episodes_fetched": True, "detailed_fetched": True,
                         "ffprobe": probe,
                     })
 
@@ -1741,7 +1824,11 @@ def _scan(plugin):
 
                     er.custom_properties.update({
                         MARKER: True,
-                        "decypharr_path": p, "episodes_fetched": True, "detailed_fetched": True,
+                        "decypharr_path": p,
+                        "decypharr_api_url": api_media_url,
+                        "decypharr_info_hash": item.get("info_hash"),
+                        "decypharr_file_path": item.get("file_path"),
+                        "episodes_fetched": True, "detailed_fetched": True,
                         "ffprobe": probe,
                     })
 
@@ -1809,14 +1896,7 @@ def _scan(plugin):
                 else:
                     release = _release_root(p, root)
 
-                    try:
-                        release_files = [
-                            os.path.realpath(os.path.join(str(release), fn))
-                            for fn in os.listdir(str(release))
-                            if os.path.isfile(os.path.join(str(release), fn))
-                        ]
-                    except OSError:
-                        release_files = []
+                    release_files = []
 
                     is_blu = (
                         Path(p).suffix.lower() == ".m2ts"
@@ -1875,7 +1955,7 @@ def _scan(plugin):
                     # ----------------------------------------------------
                     # Probe once; use same metadata for relation + filename
                     # ----------------------------------------------------
-                    probe = _ffprobe(p, cfg["ffprobe"])
+                    probe = _ffprobe(api_media_url, cfg["ffprobe"])
 
                     # ----------------------------------------------------
                     # ONE relation per canonical movie
@@ -1907,7 +1987,11 @@ def _scan(plugin):
 
                     mr.custom_properties.update({
                         MARKER: True,
-                        "decypharr_path": p, "episodes_fetched": True, "detailed_fetched": True,
+                        "decypharr_path": p,
+                        "decypharr_api_url": api_media_url,
+                        "decypharr_info_hash": item.get("info_hash"),
+                        "decypharr_file_path": item.get("file_path"),
+                        "episodes_fetched": True, "detailed_fetched": True,
                         "ffprobe": probe,
                     })
 
@@ -2061,9 +2145,10 @@ class Plugin:
     name = "Decypharr VOD"
     version = "0.4.7"
     description = "Imports Decypharr media as native Dispatcharr VOD with .strm presentation, FFprobe technical metadata, and optional TMDB metadata."
-    author = "Tw1zT3d4"
+    author = "Tw1zT3d2four7"
     fields = [
-        {"id": "root_path", "label": "Decypharr Root", "type": "string", "default": SOURCE_ROOT},
+        {"id": "api_url", "label": "Decypharr API URL", "type": "string", "default": DEFAULT_API_URL},
+        {"id": "api_token", "label": "Decypharr API Token", "type": "string", "default": ""},
         {"id": "library_root", "label": "Normalized Library", "type": "string", "default": LIBRARY_ROOT},
         {"id": "tmdb_api_key", "label": "TMDB API Key", "type": "string", "default": ""},
         {"id": "metadata_enabled", "label": "TMDB Metadata", "type": "boolean", "default": True},
