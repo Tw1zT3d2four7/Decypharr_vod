@@ -606,11 +606,47 @@ def _get_secret():
 
 
 def _play(kind, rel, ext):
-    return "http://127.0.0.1:9191/decypharr-vod/%s/%s/%s.%s" % (_get_secret(), kind, rel, ext.lstrip("."))
+    """
+    Generate a native Dispatcharr VOD URL.
+
+    `rel` is the native VOD content UUID, not the relation ID.
+    The Decypharr API token is never placed in the .strm URL.
+    """
+    return "http://127.0.0.1:9191/proxy/vod/%s/%s" % (kind, rel)
+
+
+def _current_api_token():
+    """Load the current Decypharr API token from the active plugin settings.
+
+    Playback must not depend on the module-global API_TOKEN because the
+    Django worker may have loaded the playback route before a plugin scan
+    populated that global.
+    """
+    try:
+        from apps.plugins.models import PluginConfig
+
+        config = PluginConfig.objects.filter(key=PLUGIN_KEY).first()
+        if config:
+            settings = getattr(config, "settings", {}) or {}
+            token = settings.get("api_token") or ""
+            if token:
+                return str(token).strip()
+    except Exception:
+        LOG.exception("Failed to load Decypharr API token from PluginConfig")
+
+    return API_TOKEN or ""
 
 
 def _proxy_api_file(request, api_url):
-    headers = {"Authorization": "Bearer %s" % API_TOKEN, "User-Agent": "Dispatcharr-Decypharr-VOD/0.4.7"}
+    api_token = _current_api_token()
+    if not api_token:
+        LOG.error("Decypharr playback attempted without an API token")
+        return HttpResponse(status=503)
+
+    headers = {
+        "Authorization": "Bearer %s" % api_token,
+        "User-Agent": "Dispatcharr-Decypharr-VOD/0.4.7",
+    }
     rng = request.headers.get("Range")
     if rng:
         headers["Range"] = rng
@@ -659,45 +695,153 @@ def _stream_file(request, kind, rid):
 
 
 def _install_route():
-    global ROUTE_INSTALLED
-    if ROUTE_INSTALLED:
-        return
-    try:
-        import dispatcharr.urls as urls
-        token = _get_secret()
-        def movie_view(request, token_in, rid, extension):
-            if token_in != token: raise Http404
-            return _stream_file(request, "movie", rid)
-        def episode_view(request, token_in, rid, extension):
-            if token_in != token: raise Http404
-            return _stream_file(request, "episode", rid)
-        urls.urlpatterns.insert(0, path("decypharr-vod/<str:token_in>/movie/<int:rid>.<str:extension>", movie_view))
-        urls.urlpatterns.insert(0, path("decypharr-vod/<str:token_in>/episode/<int:rid>.<str:extension>", episode_view))
-        ROUTE_INSTALLED = True
-    except Exception as e:
-        LOG.exception("Failed to install Decypharr VOD routes: %s", e)
+    """
+    Retained for compatibility with the existing Repair action.
 
+    Decypharr VOD no longer installs a dynamic Django URL route.
+    Playback uses Dispatcharr's native /proxy/vod/ endpoint.
+    """
+    global ROUTE_INSTALLED
+    ROUTE_INSTALLED = False
+    LOG.info("Decypharr VOD: native Dispatcharr VOD routing enabled.")
 
 def _patch_relations():
+    """
+    Install native Dispatcharr VOD hooks.
+
+    Decypharr relations remain normal XC relations for Dispatcharr's
+    selection machinery, but native VOD URL construction is overridden
+    for relations owned by this plugin.
+    """
     global PATCHED
     if PATCHED:
         return
-    def movie_url(self, profile=None):
-        if getattr(self.m3u_account, "name", "") == ACCOUNT_NAME:
-            return _play("movie", self.id, self.container_extension or "mp4")
-        return self._decypharr_original_url(profile)
-    def episode_url(self, profile=None):
-        if getattr(self.m3u_account, "name", "") == ACCOUNT_NAME:
-            return _play("episode", self.id, self.container_extension or "mp4")
-        return self._decypharr_original_url(profile)
-    if not hasattr(M3UMovieRelation, "_decypharr_original_url"):
-        M3UMovieRelation._decypharr_original_url = M3UMovieRelation.get_stream_url
-        M3UMovieRelation.get_stream_url = movie_url
-    if not hasattr(M3UEpisodeRelation, "_decypharr_original_url"):
-        M3UEpisodeRelation._decypharr_original_url = M3UEpisodeRelation.get_stream_url
-        M3UEpisodeRelation.get_stream_url = episode_url
-    PATCHED = True
 
+    from apps.proxy.vod_proxy import views as vod_views
+    from apps.proxy.vod_proxy import multi_worker_connection_manager as mwcm
+
+    # --------------------------------------------------------
+    # Native VOD URL builder
+    # --------------------------------------------------------
+    if not hasattr(vod_views, "_decypharr_original_build_vod_stream_url"):
+        vod_views._decypharr_original_build_vod_stream_url = (
+            vod_views._build_vod_stream_url
+        )
+
+        original_build = vod_views._build_vod_stream_url
+
+        def decypharr_build_vod_stream_url(
+            relation,
+            m3u_profile,
+            content_type,
+        ):
+            props = getattr(relation, "custom_properties", {}) or {}
+
+            if props.get(MARKER) or getattr(
+                getattr(relation, "m3u_account", None),
+                "name",
+                "",
+            ) == ACCOUNT_NAME:
+                api_url = props.get("decypharr_api_url")
+
+                if api_url:
+                    LOG.info(
+                        "[NATIVE-VOD] Decypharr URL selected for relation %s",
+                        getattr(relation, "id", "?"),
+                    )
+                    return api_url
+
+                LOG.error(
+                    "[NATIVE-VOD] Decypharr relation %s has no "
+                    "decypharr_api_url",
+                    getattr(relation, "id", "?"),
+                )
+                return None
+
+            return original_build(
+                relation,
+                m3u_profile,
+                content_type,
+            )
+
+        vod_views._build_vod_stream_url = decypharr_build_vod_stream_url
+
+    # --------------------------------------------------------
+    # Native Redis connection header injection
+    # --------------------------------------------------------
+    RedisBackedVODConnection = mwcm.RedisBackedVODConnection
+
+    if not hasattr(
+        RedisBackedVODConnection,
+        "_decypharr_original_create_connection",
+    ):
+        RedisBackedVODConnection._decypharr_original_create_connection = (
+            RedisBackedVODConnection.create_connection
+        )
+
+        original_create = RedisBackedVODConnection.create_connection
+
+        def decypharr_create_connection(
+            self,
+            stream_url,
+            headers,
+            m3u_profile_id=None,
+            content_obj_type=None,
+            content_uuid=None,
+            content_name=None,
+            client_ip=None,
+            client_user_agent=None,
+            utc_start=None,
+            utc_end=None,
+            offset=None,
+            worker_id=None,
+            user=None,
+        ):
+            headers = dict(headers or {})
+
+            if "/api/browse/download/" in str(stream_url):
+                token = _current_api_token()
+
+                if not token:
+                    LOG.error(
+                        "[NATIVE-VOD] Decypharr connection requested "
+                        "without an API token"
+                    )
+                else:
+                    headers["Authorization"] = "Bearer %s" % token
+                    headers.setdefault(
+                        "User-Agent",
+                        "Dispatcharr-Decypharr-VOD/0.4.7",
+                    )
+
+                    LOG.info(
+                        "[NATIVE-VOD] Decypharr Authorization header "
+                        "attached to Redis connection"
+                    )
+
+            return original_create(
+                self,
+                stream_url,
+                headers,
+                m3u_profile_id,
+                content_obj_type,
+                content_uuid,
+                content_name,
+                client_ip,
+                client_user_agent,
+                utc_start,
+                utc_end,
+                offset,
+                worker_id,
+                user,
+            )
+
+        RedisBackedVODConnection.create_connection = (
+            decypharr_create_connection
+        )
+
+    PATCHED = True
+    LOG.info("Decypharr VOD native Dispatcharr VOD hooks installed.")
 
 def _account():
     a = M3UAccount.objects.filter(name=ACCOUNT_NAME).first()
@@ -1209,10 +1353,30 @@ def _api_release_name(entry):
     return str(entry.get("name") or entry.get("title") or entry.get("torrent_name") or entry.get("path") or "")
 
 
-def _api_download_url(base, torrent, file_path):
-    torrent_q = urllib.parse.quote(str(torrent), safe="")
-    file_q = urllib.parse.quote(str(file_path).lstrip("/"), safe="/")
-    return base.rstrip("/") + "/api/browse/download/%s/%s" % (torrent_q, file_q)
+def _api_download_url(base, info_hash, path):
+    """
+    Build the exact Decypharr FileBrowser download URL.
+
+    Decypharr's web UI uses only the final two path components:
+      /api/browse/download/<parent>/<filename>
+
+    The info_hash and __all__ path components are NOT part of the
+    download endpoint.
+    """
+    parts = [part for part in str(path or "").split("/") if part]
+    if len(parts) < 2:
+        return ""
+
+    parent = urllib.parse.quote(parts[-2], safe="")
+    filename = urllib.parse.quote(parts[-1], safe="")
+
+    return (
+        base.rstrip("/")
+        + "/api/browse/download/"
+        + parent
+        + "/"
+        + filename
+    )
 
 
 def _api_inventory_load():
@@ -2157,7 +2321,7 @@ class Plugin:
     ]
     actions = [
         {"id": "scan", "label": "Scan Decypharr", "description": "Scan Decypharr and rebuild the normalized presentation library.", "button_label": "Scan Now", "button_variant": "filled", "button_color": "blue"},
-        {"id": "repair", "label": "Repair Integration", "description": "Reinstall routes and relation hooks and ensure the synthetic account exists.", "button_label": "Repair", "button_variant": "outlined", "button_color": "gray"},
+        {"id": "repair", "label": "Repair Integration", "description": "Reinstall native VOD hooks and ensure the synthetic account exists.", "button_label": "Repair", "button_variant": "outlined", "button_color": "gray"},
     ]
 
     def __init__(self):
