@@ -1,468 +1,518 @@
-# Decypharr VOD Plugin for Dispatcharr
+# Decypharr VOD for Dispatcharr
 
-A native Dispatcharr VOD integration for **Decypharr** that scans locally available Decypharr media, organizes it into Dispatcharr's VOD library, and provides a clean interface for browsing and playing movies and TV series.
+**Version:** 0.4.7
+**Author:** Tw1zT3d2four7
 
-The plugin is designed to work with Decypharr's filesystem-based media output while allowing Dispatcharr to manage the resulting VOD catalog.
+Decypharr VOD is a Dispatcharr plugin that imports media managed by **Decypharr** into Dispatcharr as native VOD content.
 
----
-
-## Features
-
-* **Decypharr filesystem integration**
-
-  * Scans media exposed by Decypharr.
-  * Supports TV series, seasons, and episodes.
-  * Designed around Decypharr's consolidated media tree.
-
-* **Native Dispatcharr VOD integration**
-
-  * Creates and maintains Dispatcharr VOD records.
-  * Integrates with Dispatcharr's existing movie, series, season, and episode structure.
-  * Uses Dispatcharr's VOD database rather than maintaining a separate catalog.
-
-* **Automatic media directory setup**
-
-  * Creates the plugin's required working directory automatically.
-  * No manual `mkdir`, `chmod`, or host-side preparation should be required for normal installation.
-
-* **Filesystem-based media**
-
-  * Designed for media that is already available locally through Decypharr.
-  * Does not require downloading or maintaining a second copy of the media.
-
-* **TV series organization**
-
-  * Detects series and episodes from the Decypharr media structure.
-  * Associates episodes with their corresponding seasons and series.
-  * Designed to accommodate real-world media naming rather than relying on rigid filename assumptions.
-
-* **Self-contained plugin distribution**
-
-  * Distributed as a Dispatcharr-compatible ZIP package.
-  * Plugin dependencies and supporting code are included in the distribution.
-  * Intended to work immediately after installation without requiring users to manually modify the Dispatcharr container.
+Instead of exposing the Decypharr filesystem directly to Dispatcharr, the plugin communicates with Decypharr through its authenticated API, creates a normalized local presentation library, and provides playback through an authenticated proxy route.
 
 ---
 
-# Requirements
-
-## Dispatcharr
-
-A working installation of Dispatcharr with VOD functionality enabled.
-
-The plugin is intended for modern Dispatcharr installations and should be installed through Dispatcharr's plugin management interface.
-
-## Decypharr
-
-Decypharr must already be installed and configured.
-
-The plugin expects Decypharr's media filesystem to be available to the Dispatcharr container.
-
-The default Decypharr media root used by this project is:
-
-```text
-/mnt/decypharr/__all__
-```
-
-Your Decypharr configuration may use a different location. If so, the plugin configuration should be adjusted accordingly.
-
----
-
-# Docker Mount Requirements
-
-Because Dispatcharr runs inside Docker, the Decypharr media filesystem must be visible from inside the Dispatcharr container.
-
-For installations using `/mnt` as the shared media mount, the Dispatcharr container should have access similar to:
-
-```yaml
-volumes:
-  - /mnt/:/mnt:rshared
-```
-
-The exact Docker configuration may vary depending on the host installation.
-
-After changing Docker mounts, recreate the Dispatcharr container so the new filesystem mapping is active.
-
-You can verify the mount from inside Dispatcharr with:
-
-```bash
-docker exec dispatcharr ls -la /mnt
-```
-
-The Decypharr media root should then be accessible from inside the container.
-
----
-
-# Installation
-
-## 1. Download the Plugin
-
-Download the latest release ZIP from the project's GitHub Releases page.
-
-Do **not** extract the ZIP manually unless specifically instructed by the release documentation.
-
-The ZIP is intended to be installed directly through Dispatcharr.
-
----
-
-## 2. Install Through Dispatcharr
-
-Open the Dispatcharr administration interface and navigate to the plugin management section.
-
-Upload the plugin ZIP and complete the installation.
-
-The plugin should install its required components automatically.
-
-### Automatic Directory Creation
-
-The plugin uses:
-
-```text
-/mnt/decypharr_vods
-```
-
-as its VOD working/output directory.
-
-This directory is intended to be created automatically by the plugin.
-
-Users should **not** need to manually run:
-
-```bash
-mkdir /mnt/decypharr_vods
-```
-
-or manually modify permissions as part of a normal installation.
-
-If installation fails with:
-
-```text
-[Errno 13] Permission denied: '/mnt/decypharr_vods'
-```
-
-this indicates that the Dispatcharr container does not have the required permissions to create the plugin directory under `/mnt`.
-
-See the troubleshooting section below.
-
----
-
-# Initial Configuration
-
-After installation, configure the plugin from Dispatcharr's plugin interface.
-
-The primary media source is the Decypharr media tree:
-
-```text
-/mnt/decypharr/__all__
-```
-
-The plugin's generated VOD working directory is:
-
-```text
-/mnt/decypharr_vods
-```
-
-The plugin should create this directory automatically when required.
-
----
-
-# Media Scanning
-
-Once configured, start a VOD scan from the plugin interface.
-
-The scanner examines the Decypharr media tree and identifies available VOD content.
-
-For television content, the scanner builds the appropriate hierarchy:
-
-```text
-Series
-└── Season
-    └── Episode
-```
-
-For example:
-
-```text
-Example Series
-├── Season 01
-│   ├── Episode 01
-│   ├── Episode 02
-│   └── Episode 03
-└── Season 02
-    ├── Episode 01
-    └── Episode 02
-```
-
-The resulting content is registered with Dispatcharr's VOD system.
-
----
-
-# Filename and Metadata Handling
-
-The scanner is intentionally designed for real-world media libraries.
-
-Media filenames are not always standardized. A library may contain:
-
-* scene-style names
-* release-group names
-* years
-* quality information
-* codec information
-* source tags
-* language tags
-* brackets
-* parentheses
-* punctuation
-* multiple naming conventions
-
-The scanner therefore separates **media identification** from simple destructive filename stripping.
-
-The goal is to identify the actual series/movie and episode information while preserving the underlying media path.
+## What It Does
+
+Decypharr VOD provides:
+
+* Authenticated Decypharr API discovery
+* Movie and TV episode detection
+* Native Dispatcharr VOD movie/series/episode objects
+* Normalized `.strm` presentation files
+* Decypharr API-backed playback
+* HTTP Range request support for playback
+* FFprobe technical metadata
+* Optional TMDB metadata
+* Automatic library cleanup
+* Duplicate protection
+* Automatic scanning
+* Integration repair
+* No Emby dependency
+
+The plugin is designed so Dispatcharr does **not** need direct access to the Decypharr storage implementation.
 
 ---
 
 # Architecture
 
-The plugin operates as a bridge between Decypharr's filesystem and Dispatcharr's VOD subsystem.
+The media flow is:
 
 ```text
-                 Decypharr
-                     │
-                     ▼
-             /mnt/decypharr/__all__
-                     │
-                     ▼
-                VOD Scanner
-                     │
-          ┌──────────┴──────────┐
-          │                     │
-       Movies              TV Series
-                                │
-                         ┌──────┴──────┐
-                         │             │
-                      Seasons       Episodes
-                         │             │
-                         └──────┬──────┘
-                                ▼
-                      Dispatcharr VOD DB
-                                │
-                                ▼
-                         VOD Playback
+                    ┌──────────────────────┐
+                    │      Decypharr       │
+                    │                      │
+                    │  /api/browse/...     │
+                    │  /api/browse/        │
+                    │      download/...   │
+                    └──────────┬───────────┘
+                               │
+                         Authenticated API
+                               │
+                               ▼
+                    ┌──────────────────────┐
+                    │    Decypharr VOD     │
+                    │      Plugin          │
+                    │                      │
+                    │  Discover / Parse    │
+                    │  Metadata / Normalize│
+                    └──────────┬───────────┘
+                               │
+                         .strm + metadata
+                               │
+                               ▼
+                    ┌──────────────────────┐
+                    │      Dispatcharr     │
+                    │      Native VOD      │
+                    └──────────┬───────────┘
+                               │
+                            Playback
+                               │
+                               ▼
+                    ┌──────────────────────┐
+                    │ Decypharr API Proxy  │
+                    │  Authenticated Range │
+                    │       Streaming      │
+                    └──────────────────────┘
 ```
 
-The plugin does not need to duplicate the actual media content simply to make it visible to Dispatcharr.
+The `.strm` presentation does **not** contain the Decypharr API token.
+
+The plugin keeps authentication on the server side and adds the required authorization when it communicates with Decypharr.
 
 ---
 
-# Docker Compatibility
+# Requirements
 
-The plugin is designed specifically for containerized Dispatcharr deployments.
+## Required
 
-The important requirement is that the Dispatcharr container can access the same Decypharr filesystem exposed on the host.
+* Dispatcharr
+* Decypharr
+* Decypharr API access
+* A Decypharr API token
+* FFprobe
+
+## Optional
+
+* TMDB API key
+
+TMDB metadata can be disabled if it is not required.
+
+---
+
+# Installation
+
+Install the plugin using the normal Dispatcharr plugin installation process.
+
+The plugin directory is:
+
+```text
+data/plugins/decypharr_vod/
+```
+
+The primary plugin file is:
+
+```text
+plugin.py
+```
+
+After installation, restart Dispatcharr if required by the plugin manager.
+
+---
+
+# Configuration
+
+The plugin provides the following settings.
+
+| Setting             | Description                                                   |
+| ------------------- | ------------------------------------------------------------- |
+| Decypharr API URL   | Base URL of the Decypharr API                                 |
+| Decypharr API Token | Authentication token used for Decypharr API requests          |
+| Normalized Library  | Local directory used for generated `.strm` presentation files |
+| TMDB API Key        | Optional TMDB API key                                         |
+| TMDB Metadata       | Enables/disables TMDB metadata                                |
+| FFprobe Path        | Path to the FFprobe executable                                |
+| Auto Scan Interval  | Automatic scan interval in seconds                            |
+
+Example:
+
+```text
+Decypharr API URL:
+http://192.168.1.11:8282
+
+Normalized Library:
+/data/plugins/decypharr_vod/library
+```
+
+The exact paths will depend on the Dispatcharr container configuration.
+
+---
+
+# Decypharr API
+
+The plugin uses Decypharr's API rather than directly walking the Decypharr filesystem.
+
+The primary inventory endpoint is:
+
+```text
+/api/browse/__all__
+```
+
+Release directories are then queried using their Decypharr browse path.
+
+For playback, the plugin uses:
+
+```text
+/api/browse/download/{torrent}/{file}
+```
+
+The important distinction is that the Decypharr **browse path** is used to locate the release.
+
+The Decypharr torrent identifier is used by the **download endpoint**.
+
+The plugin does not assume that an `info_hash` is itself a valid browse path.
+
+---
+
+# Authentication
+
+Decypharr API requests use:
+
+```http
+Authorization: Bearer <API_TOKEN>
+```
+
+The API token is stored in the plugin configuration.
+
+The token is **never written into generated `.strm` files**.
+
+This is intentional.
+
+A generated `.strm` file represents the media location handled by the Dispatcharr plugin. Authentication remains inside the plugin's server-side API/proxy implementation.
+
+---
+
+# Media Discovery
+
+The plugin discovers video files from Decypharr's API inventory.
+
+Supported video formats are determined by the plugin's configured video-extension list.
+
+For each Decypharr release, the plugin determines whether the content represents:
+
+* A movie
+* A TV episode
+* A multi-file release
+* A Blu-ray structure
+
+The plugin then converts the discovered source into a normalized Dispatcharr representation.
+
+---
+
+# Movies
+
+Movies are imported as native Dispatcharr VOD movies.
+
+The plugin creates a normalized structure similar to:
+
+```text
+library/
+└── movies/
+    └── Movie Name (Year)/
+        └── Movie Name (Year) Quality.strm
+```
+
+The `.strm` file points to the plugin's playback route rather than exposing the Decypharr API token.
+
+---
+
+# TV Shows
+
+TV content is imported as native Dispatcharr series and episode objects.
+
+Episodes are associated with their detected:
+
+```text
+Season
+Episode Number
+```
+
+The plugin also marks imported series as having locally fetched episode details so Dispatcharr does not attempt to retrieve the episodes through an unrelated synthetic provider.
+
+---
+
+# Blu-ray Handling
+
+The plugin supports Blu-ray-style releases containing M2TS streams.
+
+Blu-ray releases are treated as a logical media release rather than treating every `.m2ts` file as an independent movie.
+
+For TV Blu-ray releases, numbered usable streams can be mapped sequentially to episode numbers.
+
+The plugin also preserves explicitly episode-labelled files when present.
+
+Small menu, sample, and unusable streams are excluded from the primary media selection.
+
+---
+
+# Duplicate Handling
+
+The plugin performs logical deduplication before updating Dispatcharr.
+
+When multiple physical source files resolve to the same logical movie or episode, the plugin selects the largest usable source.
+
+This prevents:
+
+* Duplicate Dispatcharr relations
+* Duplicate streams
+* Scan-order-dependent source selection
+* Multiple representations of the same logical episode
+
+Canonical stream identities are used for movies and episodes so repeated scans do not continuously create duplicates.
+
+---
+
+# Metadata
+
+## FFprobe
+
+FFprobe is used to obtain technical media information such as:
+
+* Video codec
+* Audio codec
+* Resolution
+* Frame rate
+* Bitrate
+* Container information
+* Audio channels
+
+FFprobe can operate against the Decypharr API-backed media source using authenticated requests.
+
+Configure the FFprobe executable using:
+
+```text
+FFprobe Path
+```
+
+Default:
+
+```text
+/usr/local/bin/ffprobe
+```
+
+---
+
+## TMDB
+
+TMDB metadata is optional.
+
+When enabled, the plugin can use the configured TMDB API key to obtain metadata for imported movies and series.
+
+TMDB support can be disabled using:
+
+```text
+TMDB Metadata
+```
+
+---
+
+# Normalized Library
+
+The normalized library is a presentation layer for Dispatcharr.
+
+It does **not** replace Decypharr's storage.
 
 For example:
 
 ```text
-HOST
-│
-├── /mnt/decypharr/__all__
-│
-└── /mnt/decypharr_vods
-        │
-        ▼
-DISPATCHARR CONTAINER
-│
-└── /mnt/
-    ├── decypharr/
-    │   └── __all__
-    │
-    └── decypharr_vods/
+/data/plugins/decypharr_vod/library/
 ```
 
-The host filesystem remains the source of truth for the media.
+may contain generated `.strm` files while the actual media remains managed by Decypharr.
+
+This separation allows Dispatcharr to work with a predictable local library representation without requiring Dispatcharr to understand Decypharr's underlying storage layout.
+
+---
+
+# Playback
+
+Playback is handled through the plugin's local integration route.
+
+The playback path is conceptually:
+
+```text
+Dispatcharr .strm
+       ↓
+Decypharr VOD playback route
+       ↓
+Authenticated Decypharr API request
+       ↓
+/api/browse/download/{torrent}/{file}
+       ↓
+Media stream
+```
+
+The proxy supports HTTP Range requests and forwards relevant content headers so clients can perform normal media seeking and streaming.
+
+---
+
+# Scanning
+
+The plugin provides a:
+
+```text
+Scan Now
+```
+
+action.
+
+A scan:
+
+1. Connects to Decypharr
+2. Retrieves the current media inventory
+3. Resolves release paths
+4. Retrieves release contents
+5. Identifies movies and episodes
+6. Deduplicates logical media
+7. Generates/updates normalized `.strm` files
+8. Updates Dispatcharr VOD relations
+9. Updates technical metadata
+10. Optionally updates TMDB metadata
+11. Removes stale normalized files
+12. Removes stale plugin-owned relations
+13. Removes orphaned plugin-owned objects
+
+A scan does not delete the underlying Decypharr media.
+
+---
+
+# Automatic Scanning
+
+The plugin supports automatic scanning through:
+
+```text
+Auto Scan Interval (seconds)
+```
+
+The default interval is:
+
+```text
+60
+```
+
+Only one scan is allowed to run at a time.
+
+This prevents overlapping scans from modifying the same Dispatcharr objects simultaneously.
+
+---
+
+# Repair Integration
+
+The plugin provides:
+
+```text
+Repair
+```
+
+The repair action reinstalls the plugin's integration hooks and playback route and ensures the synthetic Decypharr account exists.
+
+Use this if the Dispatcharr integration has been disrupted without needing to rebuild the plugin configuration.
+
+---
+
+# Safety and Data Ownership
+
+Decypharr remains the source of truth for the actual media.
+
+The plugin owns its normalized Dispatcharr representation.
+
+The plugin's cleanup operations are limited to plugin-owned normalized files, relations, and objects.
+
+It does **not** delete the underlying Decypharr media when performing a normal scan.
 
 ---
 
 # Troubleshooting
 
-## Permission denied creating `/mnt/decypharr_vods`
+## "Decypharr Root not found"
 
-Error:
+Older versions of the plugin relied on direct filesystem scanning.
+
+Current versions use the Decypharr API.
+
+If the plugin reports a filesystem-root error, verify that the installed plugin version is current and that the API-based version of the plugin is actually loaded.
+
+---
+
+## No media discovered
+
+Verify:
+
+1. Decypharr is running.
+2. The API URL is correct.
+3. The API token is valid.
+4. `/api/browse/__all__` returns releases.
+5. Releases contain supported video files.
+6. The plugin scan completes without errors.
+
+---
+
+## Playback fails
+
+Verify:
+
+1. Decypharr API access works.
+2. The API token is configured.
+3. The generated `.strm` file does not contain an invalid/stale URL.
+4. The Decypharr download endpoint is reachable from Dispatcharr.
+5. The media file is available in Decypharr.
+6. HTTP Range requests are being handled correctly.
+
+---
+
+## Duplicate movies or episodes
+
+Run:
 
 ```text
-[Errno 13] Permission denied: '/mnt/decypharr_vods'
+Repair
 ```
 
-The plugin attempts to create its required directory automatically.
-
-This error means the Dispatcharr process does not currently have permission to create the directory at that location.
-
-First verify that `/mnt` is available inside the Dispatcharr container:
-
-```bash
-docker exec dispatcharr ls -ld /mnt
-```
-
-Then verify the container's effective user:
-
-```bash
-docker exec dispatcharr id
-```
-
-Finally verify the Docker mounts:
-
-```bash
-docker inspect dispatcharr \
-  --format '{{range .Mounts}}{{println .Source " -> " .Destination}}{{end}}'
-```
-
-A typical installation should expose the host `/mnt` tree inside Dispatcharr.
-
----
-
-## Decypharr Root Not Found
-
-If the plugin reports:
+followed by:
 
 ```text
-Decypharr root not found
+Scan Now
 ```
 
-verify the path from inside the Dispatcharr container:
-
-```bash
-docker exec dispatcharr ls -la /mnt/decypharr/__all__
-```
-
-If the directory exists on the host but not inside the container, the problem is the Docker volume mapping rather than the plugin scanner.
+The plugin uses canonical logical identities and deduplication to prevent repeated relations.
 
 ---
 
-## Scan Finds No Media
+# Version 0.4.7
 
-Verify that Decypharr has actually populated its media tree:
+Version 0.4.7 uses the authenticated Decypharr API as its media discovery source.
 
-```bash
-ls -la /mnt/decypharr/__all__
-```
+Key characteristics:
 
-Then verify the same path from Dispatcharr:
-
-```bash
-docker exec dispatcharr ls -la /mnt/decypharr/__all__
-```
-
-If the host can see the files but Dispatcharr cannot, check the Docker volume configuration.
-
----
-
-## Episodes Appear but Do Not Play
-
-If series and episodes are successfully imported but playback fails, verify that the resulting media path is accessible from inside the Dispatcharr container.
-
-For example:
-
-```bash
-docker exec dispatcharr ls -la /mnt/decypharr/__all__
-```
-
-The scanner and playback system must be able to resolve the same underlying filesystem.
+* API-based media discovery
+* Decypharr authentication
+* Browse-by-path release resolution
+* API-backed playback
+* Server-side authentication
+* Token-free `.strm` presentation
+* Native Dispatcharr VOD integration
+* Movie and TV support
+* Blu-ray/M2TS handling
+* Logical deduplication
+* FFprobe metadata
+* Optional TMDB metadata
+* Normalized library cleanup
+* Scan locking
+* Repair action
 
 ---
 
-# Development
+# Design Philosophy
 
-The repository is structured as a Dispatcharr plugin project.
+Decypharr owns the media.
 
-Development should be performed against a test Dispatcharr installation rather than directly against a production VOD database.
+Dispatcharr owns the VOD presentation.
 
-Recommended development workflow:
-
-```text
-Modify source
-    ↓
-Build plugin ZIP
-    ↓
-Install ZIP in Dispatcharr
-    ↓
-Run scan
-    ↓
-Verify database records
-    ↓
-Verify playback
-```
-
-When testing scanner changes, use a small media subset before performing a complete library scan.
-
----
-
-# Release Packaging
-
-Releases are distributed as a ZIP package compatible with Dispatcharr's plugin installer.
-
-The release package should contain everything required for the plugin to operate.
-
-Users should not need to:
-
-* manually copy Python files
-* manually install dependencies
-* manually create directories
-* manually modify plugin files
-* manually patch Dispatcharr
-* manually execute setup scripts
-
-A clean Dispatcharr installation should be sufficient.
-
----
-
-# Design Goals
-
-The project is built around several principles:
-
-### Self-contained
-
-Installation should be handled by the plugin rather than requiring users to perform host-side setup.
-
-### Non-destructive
-
-The plugin should never modify or rename the user's original Decypharr media unnecessarily.
-
-### Compatible with real media libraries
-
-Media naming conventions vary widely. The scanner should use structured parsing and metadata where available instead of depending on brittle filename stripping rules.
-
-### Container-aware
-
-Paths must be valid from the perspective of the Dispatcharr container, not merely the Docker host.
-
-### Dispatcharr-native
-
-Imported VOD content should use Dispatcharr's existing VOD infrastructure rather than creating a parallel media database.
-
----
-
-# Status
-
-**Development Status:** Active Development
-
-The project is currently being tested against real-world Decypharr media libraries and Dispatcharr VOD installations.
-
-Testing currently includes:
-
-* Decypharr filesystem discovery
-* TV series detection
-* Season detection
-* Episode detection
-* Dispatcharr VOD database integration
-* Media path resolution
-* Playback validation
-* Fresh ZIP installation
-* Automatic directory creation
-
----
-
-# Disclaimer
-
-This project is an independent community plugin and is not affiliated with, endorsed by, or officially supported by the Dispatcharr or Decypharr projects.
-
-Always maintain backups of important configuration and media metadata before testing third-party plugins or performing large VOD database operations.
-
+Decypharr VOD connects the two wi
