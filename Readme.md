@@ -485,9 +485,9 @@ The plugin uses canonical logical identities and deduplication to prevent repeat
 
 ---
 
-# Version 0.4.7
+# Version 0.4.8
 
-Version 0.4.7 uses the authenticated Decypharr API as its media discovery source.
+Version 0.4.8 uses the authenticated Decypharr API as its media discovery source.
 
 Key characteristics:
 
