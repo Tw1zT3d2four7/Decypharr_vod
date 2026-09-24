@@ -1,6 +1,6 @@
 {
   "name": "Decypharr VOD",
-  "version": "0.4.7",
+  "version": "0.4.8",
   "description": "Imports Decypharr media as native Dispatcharr VOD with a normalized .strm library, FFprobe technical metadata, genre metadata, artwork, and optional TMDB enrichment.",
   "author": "Tw1zT3d2four7",
   "fields": [
