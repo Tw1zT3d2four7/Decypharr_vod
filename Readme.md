@@ -1,6 +1,6 @@
 # Decypharr VOD for Dispatcharr
 
-**Version:** 0.4.8
+**Version:** 0.4.9
 **Author:** Tw1zT3d2four7
 
 Decypharr VOD is a Dispatcharr plugin that imports media managed by **Decypharr** into Dispatcharr as native VOD content.
@@ -485,9 +485,9 @@ The plugin uses canonical logical identities and deduplication to prevent repeat
 
 ---
 
-# Version 0.4.8
+# Version 0.4.9
 
-Version 0.4.8 uses the authenticated Decypharr API as its media discovery source.
+Version 0.4.9 uses the authenticated Decypharr API as its media discovery source.
 
 Key characteristics:
 
