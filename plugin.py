@@ -491,7 +491,7 @@ def _tmdb(api_key, endpoint, params):
     cached = _json_cache(key)
     if cached is not None:
         return cached
-    req = urllib.request.Request(url, headers={"User-Agent": "Decypharr-VOD/0.2.0"})
+    req = urllib.request.Request(url, headers={"User-Agent": "Decypharr-VOD/0.4.8"})
     for attempt in range(3):
         try:
             with urllib.request.urlopen(req, timeout=15) as r:
