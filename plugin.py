@@ -645,7 +645,7 @@ def _proxy_api_file(request, api_url):
 
     headers = {
         "Authorization": "Bearer %s" % api_token,
-        "User-Agent": "Dispatcharr-Decypharr-VOD/0.4.7",
+        "User-Agent": "Dispatcharr-Decypharr-VOD/0.4.8",
     }
     rng = request.headers.get("Range")
     if rng:
@@ -811,7 +811,7 @@ def _patch_relations():
                     headers["Authorization"] = "Bearer %s" % token
                     headers.setdefault(
                         "User-Agent",
-                        "Dispatcharr-Decypharr-VOD/0.4.7",
+                        "Dispatcharr-Decypharr-VOD/0.4.8",
                     )
 
                     LOG.info(
@@ -1281,7 +1281,7 @@ def _tv_blu_ray_episode_candidates(files):
 def _api_json(url, token, params=None, timeout=30):
     q = urllib.parse.urlencode(params or {})
     full = url + (("&" if "?" in url else "?") + q if q else "")
-    req = urllib.request.Request(full, headers={"Authorization": "Bearer %s" % token, "Accept": "application/json", "User-Agent": "Dispatcharr-Decypharr-VOD/0.4.7"})
+    req = urllib.request.Request(full, headers={"Authorization": "Bearer %s" % token, "Accept": "application/json", "User-Agent": "Dispatcharr-Decypharr-VOD/0.4.8"})
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.loads(r.read().decode("utf-8"))
 
@@ -2307,7 +2307,7 @@ def _scan(plugin):
 
 class Plugin:
     name = "Decypharr VOD"
-    version = "0.4.7"
+    version = "0.4.8"
     description = "Imports Decypharr media as native Dispatcharr VOD with .strm presentation, FFprobe technical metadata, and optional TMDB metadata."
     author = "Tw1zT3d2four7"
     fields = [
