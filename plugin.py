@@ -847,7 +847,7 @@ def _account():
     a = M3UAccount.objects.filter(name=ACCOUNT_NAME).first()
     if a:
         return a
-    a = M3UAccount.objects.create(name=ACCOUNT_NAME, account_type=M3UAccount.Types.XC, server_url="http://127.0.0.1", username="decypharr", password="disabled", file_path=LIBRARY_ROOT, is_active=False, priority=10000, max_streams=0, user_agent="Dispatcharr-Decypharr-VOD", custom_properties={MARKER: True})
+    a = M3UAccount.objects.create(name=ACCOUNT_NAME, account_type=M3UAccount.Types.XC, server_url="http://127.0.0.1", username="decypharr", password="disabled", file_path=LIBRARY_ROOT, is_active=False, priority=10000, max_streams=0, custom_properties={MARKER: True})
     return a
 
 
