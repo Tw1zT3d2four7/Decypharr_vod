@@ -1,6 +1,6 @@
 # Decypharr VOD for Dispatcharr
 
-**Version:** 0.4.9
+**Version:** 0.5.0
 **Author:** Tw1zT3d2four7
 
 Decypharr VOD is a Dispatcharr plugin that imports media managed by **Decypharr** into Dispatcharr as native VOD content.
@@ -25,6 +25,7 @@ Decypharr VOD provides:
 * Duplicate protection
 * Automatic scanning
 * Integration repair
+* Optional browser transcoding (NVIDIA, Intel, AMD, or CPU)
 * No Emby dependency
 
 The plugin is designed so Dispatcharr does **not** need direct access to the Decypharr storage implementation.
@@ -130,6 +131,11 @@ The plugin provides the following settings.
 | TMDB Metadata       | Enables/disables TMDB metadata                                |
 | FFprobe Path        | Path to the FFprobe executable                                |
 | Auto Scan Interval  | Automatic scan interval in seconds                            |
+| Browser Transcoding | Enables H.264/AAC transcoding for the Dispatcharr web player (off by default) |
+| Transcode Encoder   | Auto-detect, NVIDIA, Intel (QSV), AMD/Intel (VAAPI), or CPU only |
+| VAAPI / QSV Device  | Render device used by Intel QSV and VAAPI (default `/dev/dri/renderD128`) |
+| FFmpeg Path         | Path to the FFmpeg executable (default `/usr/local/bin/ffmpeg`) |
+| Max Simultaneous Transcodes | Upper limit on concurrent browser transcodes (default 2) |
 
 Example:
 
@@ -353,6 +359,107 @@ The proxy supports HTTP Range requests and forwards relevant content headers so 
 
 ---
 
+# Browser Transcoding
+
+Dispatcharr's web player is a browser `<video>` element. Browsers cannot reliably
+play HEVC, HDR10, Dolby audio, or MKV remuxes, so those titles may start and stop
+within seconds in the web player even though the stream itself is healthy.
+
+When **Browser Transcoding** is enabled, the plugin checks each Decypharr file the
+Dispatcharr web player opens and transcodes it to **H.264 / AAC** live **only if the
+browser cannot play it as-is**. HDR10 sources are tone-mapped to SDR. Every other
+client, including VLC, Emby, Jellyfin, Kodi, and TiviMate, is served the original file
+untouched.
+
+The feature is **off by default**. When it is off, nothing changes.
+
+## When it activates
+
+Even with the setting enabled, a file is transcoded only when the web player asks for
+it and the file is one of these:
+
+* Video other than H.264 (8-bit), VP8, VP9, or AV1, for example HEVC/x265
+* HDR10 or HLG video, or 10-bit / non-4:2:0 H.264
+* Audio other than AAC, MP3, Opus, Vorbis, or FLAC, for example AC-3, E-AC-3, DTS, TrueHD
+* A container the browser cannot open, such as MPEG-TS or AVI
+* An MKV file in a browser other than Chrome, Edge, or another Chromium browser
+
+H.264/AAC files in MP4, and H.264/AAC MKV files in Chromium browsers, play directly
+with no transcoding. The result of the check is cached for ten minutes per title.
+
+## How the encoder is chosen
+
+With **Transcode Encoder** set to *Auto-detect*, the plugin runs a one-second test
+encode with each encoder and uses the first one that works:
+
+1. NVIDIA (NVENC)
+2. Intel Quick Sync (QSV)
+3. AMD / Intel (VAAPI)
+4. CPU (libx264)
+
+A listed encoder is not enough; the test proves the container can actually use the
+GPU. You can also pick a specific encoder. If the chosen encoder does not work, the
+plugin logs the reason and falls back to the CPU. Use the **Test Transcoding**
+action to see the result for each encoder on your system.
+
+## GPU access in Docker
+
+The plugin cannot give a container access to a GPU. Add it to the Dispatcharr
+container in your compose file.
+
+NVIDIA (requires the NVIDIA Container Toolkit):
+
+```yaml
+services:
+  dispatcharr:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu, video, compute, utility]
+```
+
+Intel or AMD:
+
+```yaml
+services:
+  dispatcharr:
+    devices:
+      - /dev/dri:/dev/dri
+```
+
+Depending on your host, the container user may also need the `video` or `render`
+group (`group_add`). AMD GPUs use the VAAPI option.
+
+## Behavior and limits
+
+* Playback starts from the beginning. Seeking is limited to what the browser has
+  already buffered, and duration may not be shown.
+* Audio is downmixed to stereo AAC. Subtitles are not included.
+* Sources larger than 1080p are scaled down to 1080p.
+* **Max Simultaneous Transcodes** protects the server. Extra browser requests
+  receive a "capacity reached" response until one finishes. GPU encoders may also
+  have their own session limits.
+* Browsers open several connections for one file (an initial burst, and again on
+  seek). The newest request for a title from a client replaces that client's older
+  transcode, so they never stack up.
+* If anything in the transcode path fails, playback falls back to the original
+  file.
+* The Decypharr API token is never placed on a command line. The transcoder reads
+  the media through Dispatcharr's own VOD endpoint.
+
+## Testing status
+
+The NVIDIA encode path was benchmarked with FFmpeg on an NVIDIA GTX 960, and the
+CPU path and routing logic were tested with real FFmpeg. The Intel QSV and AMD
+VAAPI command lines follow standard FFmpeg usage but have not been tested on
+hardware. If they fail on your system, the plugin falls back to the CPU.
+Reports are welcome.
+
+---
+
 # Scanning
 
 The plugin provides a:
@@ -485,9 +592,9 @@ The plugin uses canonical logical identities and deduplication to prevent repeat
 
 ---
 
-# Version 0.4.9
+# Version 0.5.0
 
-Version 0.4.9 uses the authenticated Decypharr API as its media discovery source.
+Version 0.5.0 uses the authenticated Decypharr API as its media discovery source.
 
 Key characteristics:
 
@@ -506,6 +613,7 @@ Key characteristics:
 * Normalized library cleanup
 * Scan locking
 * Repair action
+* Optional browser transcoding with hardware auto-detection
 
 ---
 
@@ -515,4 +623,4 @@ Decypharr owns the media.
 
 Dispatcharr owns the VOD presentation.
 
-Decypharr VOD connects the two wi
+Decypharr VOD connects the two through a normalized, API-backed presentation layer.

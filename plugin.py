@@ -491,7 +491,7 @@ def _tmdb(api_key, endpoint, params):
     cached = _json_cache(key)
     if cached is not None:
         return cached
-    req = urllib.request.Request(url, headers={"User-Agent": "Decypharr-VOD/0.4.9"})
+    req = urllib.request.Request(url, headers={"User-Agent": "Decypharr-VOD/0.5.0"})
     for attempt in range(3):
         try:
             with urllib.request.urlopen(req, timeout=15) as r:
@@ -645,7 +645,7 @@ def _proxy_api_file(request, api_url):
 
     headers = {
         "Authorization": "Bearer %s" % api_token,
-        "User-Agent": "Dispatcharr-Decypharr-VOD/0.4.9",
+        "User-Agent": "Dispatcharr-Decypharr-VOD/0.5.0",
     }
     rng = request.headers.get("Range")
     if rng:
@@ -811,7 +811,7 @@ def _patch_relations():
                     headers["Authorization"] = "Bearer %s" % token
                     headers.setdefault(
                         "User-Agent",
-                        "Dispatcharr-Decypharr-VOD/0.4.9",
+                        "Dispatcharr-Decypharr-VOD/0.5.0",
                     )
 
                     LOG.info(
@@ -1281,7 +1281,7 @@ def _tv_blu_ray_episode_candidates(files):
 def _api_json(url, token, params=None, timeout=30):
     q = urllib.parse.urlencode(params or {})
     full = url + (("&" if "?" in url else "?") + q if q else "")
-    req = urllib.request.Request(full, headers={"Authorization": "Bearer %s" % token, "Accept": "application/json", "User-Agent": "Dispatcharr-Decypharr-VOD/0.4.9"})
+    req = urllib.request.Request(full, headers={"Authorization": "Bearer %s" % token, "Accept": "application/json", "User-Agent": "Dispatcharr-Decypharr-VOD/0.5.0"})
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.loads(r.read().decode("utf-8"))
 
@@ -2305,9 +2305,633 @@ def _scan(plugin):
         SCAN_LOCK.release()
 
 
+# ================================================================
+# Browser transcoding (optional, OFF by default)
+#
+# Dispatcharr's web player is a browser <video> element, which cannot
+# decode HEVC / HDR10 remuxes. When "Browser Transcoding" is enabled,
+# requests made by that player for Decypharr-owned content are answered
+# with a live H.264/AAC fragmented-MP4 transcode. Every other client
+# (VLC, Emby, Jellyfin, TiviMate, Kodi, ...) is passed through untouched.
+#
+# The transcoder reads its source through Dispatcharr's own
+# /proxy/vod/ endpoint, so the Decypharr API token never appears in a
+# process command line. Any failure falls back to normal passthrough.
+# ================================================================
+TX_MARK = "DecypharrVODTx"
+TX_LOCAL_BASE = "http://127.0.0.1:9191"
+TX_ORDER = ("nvenc", "qsv", "vaapi", "cpu")
+TX_CACHE_TTL = 3600
+TX_CFG_TTL = 5
+TX_START_TIMEOUT = 60
+TX_UA = "DecypharrVOD-Transcode"
+TX_HDR_TRANSFERS = {"smpte2084", "arib-std-b67"}
+TX_SAFE_VIDEO = {"h264", "vp8", "vp9", "av1"}
+TX_SAFE_AUDIO = {"aac", "mp3", "opus", "vorbis", "flac"}
+TX_PROBE_TTL = 600
+TX_TONEMAP = (
+    "zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,"
+    "tonemap=tonemap=hable:desat=0,zscale=t=bt709:m=bt709:r=tv,format=yuv420p"
+)
+TX_NON_BROWSER = re.compile(
+    r"(vlc|lavf|ffmpeg|kodi|tivimate|emby|jellyfin|plex|infuse|exoplayer|okhttp|dalvik|curl|wget|python|decypharrvod)",
+    re.I,
+)
+_TX_LOCK = threading.Lock()
+_TX_CACHE = {}
+_TX_CFG = {"ts": 0.0, "cfg": None}
+_TX_PATCHED = False
+_TX_PROBE_CACHE = {}
+_TX_PROBE_LOCK = threading.Lock()
+
+
+def _tx_bool(value, default=False):
+    if value is None or value == "":
+        return default
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on")
+    return bool(value)
+
+
+def _tx_settings(force=False):
+    """Current transcode settings, read live from the plugin config (5s cache)."""
+    now = time.time()
+    if not force and _TX_CFG["cfg"] is not None and now - _TX_CFG["ts"] < TX_CFG_TTL:
+        return _TX_CFG["cfg"]
+    raw = {}
+    try:
+        from apps.plugins.models import PluginConfig
+
+        config = PluginConfig.objects.filter(key=PLUGIN_KEY).first()
+        if config:
+            raw = getattr(config, "settings", {}) or {}
+    except Exception:
+        LOG.exception("Decypharr VOD: could not read transcode settings")
+    try:
+        max_streams = int(raw.get("transcode_max_streams") or 2)
+    except (TypeError, ValueError):
+        max_streams = 2
+    encoder = str(raw.get("transcode_encoder") or "auto").strip().lower()
+    if encoder not in ("auto",) + TX_ORDER:
+        encoder = "auto"
+    cfg = {
+        "enabled": _tx_bool(raw.get("browser_transcode"), False),
+        "encoder": encoder,
+        "vaapi_device": str(raw.get("vaapi_device") or "/dev/dri/renderD128").strip(),
+        "ffmpeg_path": str(raw.get("ffmpeg_path") or "").strip(),
+        "ffprobe_path": str(raw.get("ffprobe_path") or "").strip(),
+        "max_streams": max(1, max_streams),
+    }
+    _TX_CFG["ts"] = now
+    _TX_CFG["cfg"] = cfg
+    return cfg
+
+
+def _tx_find_binary(name, configured, sibling_of=None):
+    candidates = []
+    if configured:
+        candidates.append(configured)
+    if sibling_of:
+        candidates.append(os.path.join(os.path.dirname(sibling_of), name))
+    found = shutil.which(name)
+    if found:
+        candidates.append(found)
+    for candidate in candidates:
+        if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return None
+
+
+def _tx_find_ffmpeg(cfg):
+    return _tx_find_binary("ffmpeg", cfg.get("ffmpeg_path"), cfg.get("ffprobe_path"))
+
+
+def _tx_find_ffprobe(cfg, ffmpeg):
+    return _tx_find_binary("ffprobe", cfg.get("ffprobe_path"), ffmpeg)
+
+
+def _tx_encoder_parts(encoder, vaapi_device):
+    """Return (global_args, filter_suffix, codec_args) for an encoder."""
+    rate = ["-b:v", "8M", "-maxrate", "12M", "-bufsize", "24M", "-g", "48"]
+    if encoder == "nvenc":
+        return [], "", ["-c:v", "h264_nvenc"] + rate
+    if encoder == "qsv":
+        return (
+            [
+                "-init_hw_device", "vaapi=va:%s" % vaapi_device,
+                "-init_hw_device", "qsv=hw@va",
+                "-filter_hw_device", "hw",
+            ],
+            ",format=nv12,hwupload=extra_hw_frames=64",
+            ["-c:v", "h264_qsv"] + rate,
+        )
+    if encoder == "vaapi":
+        return (
+            ["-vaapi_device", vaapi_device],
+            ",format=nv12,hwupload",
+            ["-c:v", "h264_vaapi"] + rate,
+        )
+    threads = max(2, (os.cpu_count() or 4) // 2)
+    return (
+        [],
+        "",
+        [
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "22",
+            "-maxrate", "12M", "-bufsize", "24M", "-g", "48", "-keyint_min", "48",
+            "-sc_threshold", "0", "-threads", str(threads),
+        ],
+    )
+
+
+TX_GENERIC_ERR = (
+    "nothing was written", "conversion failed", "terminating thread", "task finished",
+    "error sending frames", "could not open encoder before eof", "error while opening encoder",
+    "error while filtering", "error initializing output",
+)
+TX_HINT_ERR = ("cuda", "nvenc", "device", "permission", "cannot", "can't", "not found", "no such", "unknown encoder", "driver", "vaapi", "qsv", "libva")
+
+
+def _tx_reason(stderr, returncode=None):
+    """Pick the line of ffmpeg output that explains why an encoder failed."""
+    lines = []
+    for raw in (stderr or "").splitlines():
+        line = re.sub(r"^\[[^\]]*\]\s*", "", raw.strip())
+        if line and not any(g in line.lower() for g in TX_GENERIC_ERR):
+            lines.append(line)
+    hinted = [ln for ln in lines if any(h in ln.lower() for h in TX_HINT_ERR)]
+    picked = (hinted or lines or ["exit code %s" % returncode])[0]
+    return picked[:220]
+
+
+def _tx_smoke(ffmpeg, encoder, vaapi_device):
+    """Run a 1-second synthetic encode. Returns (ok, reason)."""
+    pre, suffix, codec = _tx_encoder_parts(encoder, vaapi_device)
+    cmd = (
+        [ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin"]
+        + pre
+        + ["-f", "lavfi", "-i", "testsrc2=size=1280x720:rate=30", "-t", "1", "-vf", "format=yuv420p" + suffix]
+        + codec
+        + ["-f", "null", "-"]
+    )
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=25)
+    except subprocess.TimeoutExpired:
+        return False, "timed out"
+    except Exception as exc:
+        return False, str(exc)
+    if proc.returncode == 0:
+        return True, ""
+    return False, _tx_reason(proc.stderr, proc.returncode)
+
+
+def _tx_detect(cfg, ffmpeg, force=False):
+    """Pick the encoder to use. Returns {"encoder", "results", "ts"} (cached)."""
+    key = (ffmpeg, cfg["encoder"], cfg["vaapi_device"])
+    with _TX_LOCK:
+        hit = _TX_CACHE.get(key)
+        if hit and not force and time.time() - hit["ts"] < hit.get("ttl", TX_CACHE_TTL):
+            return hit
+        wanted = cfg["encoder"]
+        order = list(TX_ORDER) if wanted == "auto" else [wanted]
+        if "cpu" not in order:
+            order.append("cpu")
+        results = {}
+        chosen = None
+        for encoder in order:
+            ok, why = _tx_smoke(ffmpeg, encoder, cfg["vaapi_device"])
+            results[encoder] = "ok" if ok else why
+            if ok:
+                chosen = encoder
+                break
+        if wanted not in ("auto", chosen) and chosen:
+            LOG.warning(
+                "Decypharr VOD: selected encoder '%s' is not usable (%s); using '%s'",
+                wanted, results.get(wanted), chosen,
+            )
+        LOG.info("Decypharr VOD: transcode encoder = %s (tests: %s)", chosen, results)
+        # A CPU fallback is re-checked every minute so a recovered GPU is picked up quickly.
+        ttl = TX_CACHE_TTL if chosen and chosen != "cpu" else 60
+        entry = {"encoder": chosen, "results": results, "ts": time.time(), "ttl": ttl}
+        _TX_CACHE[key] = entry
+        return entry
+
+
+def _tx_active_count():
+    """Number of running plugin transcodes in this container (all workers)."""
+    marker = TX_MARK.encode()
+    count = 0
+    try:
+        for pid in os.listdir("/proc"):
+            if not pid.isdigit():
+                continue
+            try:
+                with open("/proc/%s/cmdline" % pid, "rb") as handle:
+                    cmdline = handle.read()
+            except Exception:
+                continue
+            if marker in cmdline and b"ffmpeg" in cmdline:
+                count += 1
+    except Exception:
+        return 0
+    return count
+
+
+def _tx_probe(ffprobe, url):
+    """Probe the source. Returns {"video", "audio", "format"} or None when unreadable."""
+    cmd = [
+        ffprobe, "-hide_banner", "-v", "error", "-user_agent", TX_UA,
+        "-show_entries",
+        "stream=codec_type,codec_name,profile,pix_fmt,color_transfer:format=format_name",
+        "-of", "json", url,
+    ]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        data = json.loads(proc.stdout or "{}")
+    except Exception:
+        LOG.exception("Decypharr VOD: transcode probe failed")
+        return None
+    streams = data.get("streams") or []
+    video = next(
+        (s for s in streams
+         if s.get("codec_type") == "video" and s.get("codec_name") not in ("mjpeg", "png", "bmp")),
+        None,
+    )
+    if not video:
+        return None
+    audio = next((s for s in streams if s.get("codec_type") == "audio"), None)
+    return {"video": video, "audio": audio, "format": (data.get("format") or {}).get("format_name", "")}
+
+
+def _tx_probe_cached(ffprobe, url, cache_key):
+    """Probe once per title (10 minute cache); serialised so a request burst probes once."""
+    with _TX_PROBE_LOCK:
+        hit = _TX_PROBE_CACHE.get(cache_key)
+        if hit and time.time() - hit[0] < TX_PROBE_TTL:
+            return hit[1], True
+        info = _tx_probe(ffprobe, url)
+        if info:
+            if len(_TX_PROBE_CACHE) > 500:
+                _TX_PROBE_CACHE.clear()
+            _TX_PROBE_CACHE[cache_key] = (time.time(), info)
+        return info, False
+
+
+def _tx_needs_transcode(info, agent):
+    """Decide whether a browser cannot play this file as-is. Returns (bool, reason)."""
+    video = info["video"]
+    audio = info.get("audio")
+    vcodec = (video.get("codec_name") or "").lower()
+    acodec = ((audio or {}).get("codec_name") or "").lower()
+    if vcodec not in TX_SAFE_VIDEO:
+        return True, "video codec %s" % (vcodec or "unknown")
+    if str(video.get("color_transfer") or "").lower() in TX_HDR_TRANSFERS:
+        return True, "HDR video"
+    if vcodec == "h264" and (video.get("pix_fmt") or "yuv420p") not in ("yuv420p", "yuvj420p"):
+        return True, "h264 %s" % video.get("pix_fmt")
+    if audio and acodec not in TX_SAFE_AUDIO:
+        return True, "audio codec %s" % (acodec or "unknown")
+    tokens = set((info.get("format") or "").lower().split(","))
+    if tokens & {"mov", "mp4"} and "matroska" not in tokens:
+        return False, "browser-compatible"
+    if tokens & {"matroska", "webm"}:
+        if any(t in (agent or "") for t in ("Chrome/", "Chromium/", "Edg/")):
+            return False, "browser-compatible"
+        if vcodec in ("vp8", "vp9", "av1") and acodec in ("opus", "vorbis", ""):
+            return False, "browser-compatible"
+        return True, "matroska container in this browser"
+    return True, "container %s" % ((info.get("format") or "unknown").split(",")[0])
+
+
+def _tx_client_ip(request):
+    forwarded = request.META.get("HTTP_X_FORWARDED_FOR", "")
+    raw = forwarded.split(",")[0].strip() if forwarded else request.META.get("REMOTE_ADDR", "")
+    return re.sub(r"[^0-9a-fA-F:.]", "", raw) or "unknown"
+
+
+def _tx_read_cmdline(pid):
+    try:
+        with open("/proc/%s/cmdline" % pid, "rb") as handle:
+            return handle.read()
+    except Exception:
+        return b""
+
+
+def _tx_kill_matching(tag):
+    """Kill running transcodes carrying this tag, in any worker. Returns how many."""
+    import signal
+
+    needle = tag.encode()
+    killed = []
+    try:
+        for pid in os.listdir("/proc"):
+            if not pid.isdigit() or int(pid) == os.getpid():
+                continue
+            cmdline = _tx_read_cmdline(pid)
+            if needle in cmdline and b"ffmpeg" in cmdline:
+                try:
+                    os.kill(int(pid), signal.SIGKILL)
+                    killed.append(pid)
+                except Exception:
+                    pass
+    except Exception:
+        return 0
+    total = len(killed)
+    deadline = time.time() + 3.0
+    while killed and time.time() < deadline:
+        killed = [p for p in killed if needle in _tx_read_cmdline(p)]
+        if killed:
+            time.sleep(0.05)
+    return total
+
+
+def _tx_build_cmd(ffmpeg, encoder, cfg, src_url, hdr, tag=TX_MARK):
+    pre, suffix, codec = _tx_encoder_parts(encoder, cfg["vaapi_device"])
+    vf = ",".join(["scale=-2:'min(1080,ih)'", TX_TONEMAP if hdr else "format=yuv420p"]) + suffix
+    return (
+        [ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin"]
+        + pre
+        + ["-user_agent", TX_UA, "-i", src_url, "-map", "0:v:0", "-map", "0:a:0?", "-sn", "-dn", "-vf", vf]
+        + codec
+        + [
+            "-c:a", "aac", "-ac", "2", "-b:a", "192k",
+            "-max_muxing_queue_size", "1024",
+            "-metadata", "comment=" + tag,
+            "-movflags", "+frag_keyframe+empty_moov+default_base_moof",
+            "-f", "mp4", "pipe:1",
+        ]
+    )
+
+
+def _tx_kill(proc):
+    try:
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait(timeout=5)
+    except Exception:
+        pass
+
+
+def _tx_spawn(cmd):
+    """Start ffmpeg and wait for its first output. Returns (proc, first, error_tail)."""
+    import collections
+
+    proc = subprocess.Popen(
+        cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0
+    )
+    tail = collections.deque(maxlen=25)
+
+    def drain():
+        try:
+            for line in iter(proc.stderr.readline, b""):
+                tail.append(line.decode("utf-8", "replace").rstrip())
+        except Exception:
+            pass
+
+    threading.Thread(target=drain, daemon=True).start()
+    timer = threading.Timer(TX_START_TIMEOUT, lambda: _tx_kill(proc))
+    timer.daemon = True
+    timer.start()
+    try:
+        first = proc.stdout.read(65536)
+    finally:
+        timer.cancel()
+    if not first:
+        _tx_kill(proc)
+        return None, None, " | ".join(list(tail)[-6:])
+    return proc, first, ""
+
+
+def _tx_iter(proc, first):
+    try:
+        yield first
+        while True:
+            chunk = proc.stdout.read(65536)
+            if not chunk:
+                break
+            yield chunk
+    finally:
+        _tx_kill(proc)
+        try:
+            proc.stdout.close()
+        except Exception:
+            pass
+
+
+def _tx_wants(request):
+    """True for requests made by a browser video element (Dispatcharr web player)."""
+    flag = request.GET.get("transcode")
+    if flag == "0":
+        return False
+    if flag == "1":
+        return True
+    agent = request.META.get("HTTP_USER_AGENT", "") or ""
+    if "Mozilla/5.0" not in agent or TX_NON_BROWSER.search(agent):
+        return False
+    referer = request.META.get("HTTP_REFERER", "") or ""
+    fetch_dest = request.META.get("HTTP_SEC_FETCH_DEST", "") or ""
+    return "/vods" in referer or fetch_dest == "video"
+
+
+def _tx_owned(content_type, content_id, stream_id):
+    """True when the requested content belongs to this plugin's synthetic account."""
+    try:
+        if content_type == "movie":
+            qs = M3UMovieRelation.objects.filter(m3u_account__name=ACCOUNT_NAME)
+            if stream_id and str(stream_id).startswith(PREFIX):
+                return qs.filter(stream_id=stream_id).exists()
+            return qs.filter(movie__uuid=content_id).exists()
+        if content_type == "episode":
+            qs = M3UEpisodeRelation.objects.filter(m3u_account__name=ACCOUNT_NAME)
+            if stream_id and str(stream_id).startswith(PREFIX):
+                return qs.filter(stream_id=stream_id).exists()
+            return qs.filter(episode__uuid=content_id).exists()
+    except Exception:
+        LOG.exception("Decypharr VOD: transcode ownership check failed")
+    return False
+
+
+def _tx_maybe(request, kwargs):
+    """Return a transcoded response, or None to use normal passthrough."""
+    if request.method != "GET":
+        return None
+    cfg = _tx_settings()
+    if not cfg["enabled"] or not _tx_wants(request):
+        return None
+    content_type = kwargs.get("content_type")
+    content_id = kwargs.get("content_id")
+    if content_type not in ("movie", "episode") or not content_id:
+        return None
+    stream_id = request.GET.get("stream_id") or ""
+    if not _tx_owned(content_type, content_id, stream_id):
+        return None
+
+    ffmpeg = _tx_find_ffmpeg(cfg)
+    if not ffmpeg:
+        LOG.warning("Decypharr VOD: browser transcoding is enabled but ffmpeg was not found; using passthrough")
+        return None
+
+    # Same access rules as Dispatcharr's own stream_vod view.
+    from django.http import JsonResponse
+    from apps.proxy.vod_proxy import views as vod_views
+
+    allowed = getattr(vod_views, "network_access_allowed", None)
+    if allowed and not allowed(request, "STREAMS"):
+        return JsonResponse({"error": "Forbidden"}, status=403)
+    playback = getattr(vod_views, "_vod_playback_allowed", None)
+    user_of = getattr(vod_views, "_user_from_vod_request", None)
+    if playback and not playback(content_type, user_of(request) if user_of else None):
+        return JsonResponse({"error": "Forbidden"}, status=403)
+
+    import uuid
+
+    params = {"transcode": "0"}
+    for name in ("stream_id", "m3u_account_id"):
+        if request.GET.get(name):
+            params[name] = request.GET.get(name)
+
+    def source_url(prefix):
+        session = "%s_%d_%s" % (prefix, int(time.time() * 1000), uuid.uuid4().hex[:6])
+        return "%s/proxy/vod/%s/%s/%s?%s" % (
+            TX_LOCAL_BASE, content_type, content_id, session, urllib.parse.urlencode(params)
+        )
+
+    # 1. Transcode only what a browser cannot play as-is.
+    ffprobe = _tx_find_ffprobe(cfg, ffmpeg)
+    if not ffprobe:
+        LOG.warning("Decypharr VOD: ffprobe not found; browser transcoding skipped")
+        return None
+    agent = request.META.get("HTTP_USER_AGENT", "") or ""
+    info, cached = _tx_probe_cached(ffprobe, source_url("vodtxp"), (content_type, str(content_id), stream_id))
+    if not info:
+        LOG.warning("Decypharr VOD: could not probe source for transcoding; using passthrough")
+        return None
+    needs, reason = _tx_needs_transcode(info, agent)
+    if not needs:
+        if not cached:
+            LOG.info(
+                "Decypharr VOD: %s plays natively in the browser (%s/%s); passthrough",
+                content_type, info["video"].get("codec_name"), (info.get("audio") or {}).get("codec_name"),
+            )
+        return None
+    hdr = str(info["video"].get("color_transfer") or "").lower() in TX_HDR_TRANSFERS
+
+    detected = _tx_detect(cfg, ffmpeg)
+    if not detected.get("encoder"):
+        LOG.error("Decypharr VOD: no working encoder found (%s); using passthrough", detected.get("results"))
+        return None
+
+    # 2. Newest request wins. A browser opens overlapping connections for one
+    #    file (open burst, seek); replace this client's older transcode of the
+    #    same title instead of stacking them.
+    tag = "%s|%s|%s|" % (TX_MARK, _tx_client_ip(request), content_id)
+    if _tx_kill_matching(tag):
+        LOG.info("Decypharr VOD: replaced an earlier transcode of the same title for this client")
+
+    if _tx_active_count() >= cfg["max_streams"]:
+        LOG.warning("Decypharr VOD: transcode limit (%s) reached", cfg["max_streams"])
+        return HttpResponse("Transcode capacity reached. Try again shortly.", status=503)
+
+    src_url = source_url("vodtx")
+    LOG.info("Decypharr VOD: transcoding needed (%s)", reason)
+
+    encoders = [detected["encoder"]] + (["cpu"] if detected["encoder"] != "cpu" else [])
+    attempts = [(encoder, hdr) for encoder in encoders]
+    if hdr:
+        # Last resort for ffmpeg builds without the tone-mapping filters:
+        # washed-out colours are better than no picture.
+        attempts.append((encoders[-1], False))
+    for encoder, use_tonemap in attempts:
+        cmd = _tx_build_cmd(ffmpeg, encoder, cfg, src_url, use_tonemap, tag)
+        proc, first, err = _tx_spawn(cmd)
+        if proc:
+            LOG.info(
+                "Decypharr VOD: browser transcode started (%s, %s, %s)",
+                encoder, "HDR->SDR tonemap" if use_tonemap else ("HDR without tonemap" if hdr else "SDR"), content_type,
+            )
+            response = StreamingHttpResponse(_tx_iter(proc, first), status=200, content_type="video/mp4")
+            response["Accept-Ranges"] = "none"
+            response["Cache-Control"] = "no-store"
+            response["X-Accel-Buffering"] = "no"
+            return response
+        LOG.error("Decypharr VOD: %s transcode produced no output: %s", encoder, err)
+        if encoder != "cpu":
+            _TX_CACHE.clear()  # re-detect on the next request instead of trusting a dead GPU
+    return None
+
+
+def _tx_wrap(original):
+    import functools
+    from django.views.decorators.csrf import csrf_exempt
+
+    @csrf_exempt
+    @functools.wraps(original)
+    def decypharr_stream_vod(request, *args, **kwargs):
+        try:
+            response = _tx_maybe(request, kwargs)
+            if response is not None:
+                return response
+        except Exception:
+            LOG.exception("Decypharr VOD: transcode path failed; using passthrough")
+        return original(request, *args, **kwargs)
+
+    decypharr_stream_vod._decypharr_tx_wrapper = True
+    decypharr_stream_vod._decypharr_original = original
+    return decypharr_stream_vod
+
+
+def _patch_transcode():
+    """Wrap Dispatcharr's stream_vod URL callbacks. Never raises."""
+    global _TX_PATCHED
+    try:
+        from apps.proxy.vod_proxy import views as vod_views
+        from apps.proxy.vod_proxy import urls as vod_urls
+
+        original = getattr(vod_views, "stream_vod", None)
+        wrapped = 0
+        for pattern in getattr(vod_urls, "urlpatterns", []):
+            callback = getattr(pattern, "callback", None)
+            if callback is None:
+                continue
+            if getattr(callback, "_decypharr_tx_wrapper", False):
+                wrapped += 1
+            elif original is not None and callback is original:
+                pattern.callback = _tx_wrap(original)
+                wrapped += 1
+        _TX_PATCHED = wrapped > 0
+        if _TX_PATCHED:
+            LOG.info("Decypharr VOD: browser transcode hook installed on %d route(s)", wrapped)
+        else:
+            LOG.warning("Decypharr VOD: stream_vod routes not found; browser transcoding unavailable")
+    except Exception:
+        _TX_PATCHED = False
+        LOG.exception("Decypharr VOD: could not install browser transcode hook")
+    return _TX_PATCHED
+
+
+def _tx_test(cfg):
+    """Human-readable encoder test report for the 'Test Transcoding' action."""
+    ffmpeg = _tx_find_ffmpeg(cfg)
+    if not ffmpeg:
+        return {"status": "error", "message": "ffmpeg not found. Set the FFmpeg Path setting."}
+    detected = _tx_detect(cfg, ffmpeg, force=True)
+    lines = ["ffmpeg: %s" % ffmpeg]
+    for encoder, result in detected["results"].items():
+        lines.append("%s: %s" % (encoder, "OK" if result == "ok" else "failed (%s)" % result))
+    chosen = detected.get("encoder")
+    lines.append("Selected: %s" % (chosen or "none"))
+    lines.append("Browser transcoding is %s." % ("ENABLED" if cfg["enabled"] else "disabled"))
+    lines.append("Hook installed: %s" % ("yes" if _TX_PATCHED else "no"))
+    return {
+        "status": "ok" if chosen else "error",
+        "message": " | ".join(lines),
+        "encoder": chosen,
+        "results": detected["results"],
+    }
+
+
 class Plugin:
     name = "Decypharr VOD"
-    version = "0.4.9"
+    version = "0.5.0"
     description = "Imports Decypharr media as native Dispatcharr VOD with .strm presentation, FFprobe technical metadata, and optional TMDB metadata."
     author = "Tw1zT3d2four7"
     fields = [
@@ -2318,21 +2942,36 @@ class Plugin:
         {"id": "metadata_enabled", "label": "TMDB Metadata", "type": "boolean", "default": True},
         {"id": "ffprobe_path", "label": "FFprobe Path", "type": "string", "default": "/usr/local/bin/ffprobe"},
         {"id": "scan_interval", "label": "Auto Scan Interval (seconds)", "type": "number", "default": 60},
+        {"id": "transcode_info", "label": "About Browser Transcoding", "type": "info", "help_text": 'Browsers cannot play many common files: HEVC/x265, HDR10, and Dolby or DTS audio. In the Dispatcharr web player these start, stall, or freeze even though the stream is healthy. When enabled, the plugin checks each file the web player opens and converts only files the browser cannot play into H.264/AAC on the fly. Files a browser already plays, and every other app (VLC, Emby, Jellyfin, TiviMate, Kodi), are never transcoded. Seeking is limited while transcoding.'},
+        {"id": "browser_transcode", "label": "Browser Transcoding", "type": "boolean", "default": False, "help_text": "Only used by the Dispatcharr web player, and only for files the browser cannot play. Off by default."},
+        {"id": "transcode_encoder", "label": "Transcode Encoder", "type": "select", "default": "auto", "options": [
+            {"value": "auto", "label": "Auto-detect (recommended)"},
+            {"value": "nvenc", "label": "NVIDIA (NVENC)"},
+            {"value": "qsv", "label": "Intel (Quick Sync)"},
+            {"value": "vaapi", "label": "AMD / Intel (VAAPI)"},
+            {"value": "cpu", "label": "CPU only (libx264)"},
+        ], "help_text": "Auto tests NVIDIA, Intel, then AMD/VAAPI and falls back to CPU."},
+        {"id": "vaapi_device", "label": "VAAPI / QSV Render Device", "type": "string", "default": "/dev/dri/renderD128"},
+        {"id": "ffmpeg_path", "label": "FFmpeg Path", "type": "string", "default": "/usr/local/bin/ffmpeg"},
+        {"id": "transcode_max_streams", "label": "Max Simultaneous Transcodes", "type": "number", "default": 2},
     ]
     actions = [
         {"id": "scan", "label": "Scan Decypharr", "description": "Scan Decypharr and rebuild the normalized presentation library.", "button_label": "Scan Now", "button_variant": "filled", "button_color": "blue"},
         {"id": "repair", "label": "Repair Integration", "description": "Reinstall native VOD hooks and ensure the synthetic account exists.", "button_label": "Repair", "button_variant": "outlined", "button_color": "gray"},
+        {"id": "transcode_test", "label": "Test Transcoding", "description": "Test which hardware encoders (NVIDIA, Intel, AMD/VAAPI) or the CPU can transcode on this system.", "button_label": "Test", "button_variant": "outlined", "button_color": "gray"},
     ]
 
     def __init__(self):
         self._settings = {}
-        _install_route(); _patch_relations(); _account()
+        _install_route(); _patch_relations(); _account(); _patch_transcode()
 
     def run(self, action, params, context):
         self._settings = (context or {}).get("settings") or getattr(self, "_settings", {}) or {}
         if action == "repair":
-            _install_route(); _patch_relations(); _account()
-            return {"status": "ok", "message": "Decypharr VOD integration repaired.", "route_installed": ROUTE_INSTALLED, "patched": PATCHED}
+            _install_route(); _patch_relations(); _account(); _patch_transcode()
+            return {"status": "ok", "message": "Decypharr VOD integration repaired.", "route_installed": ROUTE_INSTALLED, "patched": PATCHED, "transcode_hook": _TX_PATCHED}
+        if action == "transcode_test":
+            return _tx_test(_tx_settings(force=True))
         if action == "scan":
             return _scan(self)
         return {"status": "error", "message": "Unknown action: %s" % action}

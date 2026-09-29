@@ -1,7 +1,7 @@
 {
   "name": "Decypharr VOD",
-  "version": "0.4.9",
-  "description": "Imports Decypharr media as native Dispatcharr VOD with a normalized .strm library, FFprobe technical metadata, genre metadata, artwork, and optional TMDB enrichment.",
+  "version": "0.5.0",
+  "description": "Imports Decypharr media as native Dispatcharr VOD with a normalized .strm library, FFprobe technical metadata, genre metadata, artwork, and optional TMDB enrichment, plus optional hardware-accelerated transcoding for the Dispatcharr web player.",
   "author": "Tw1zT3d2four7",
   "fields": [
     {
@@ -45,6 +45,66 @@
       "label": "Auto Scan Interval (seconds)",
       "type": "number",
       "default": 60
+    },
+    {
+      "id": "transcode_info",
+      "label": "About Browser Transcoding",
+      "type": "info",
+      "help_text": "Browsers cannot play many common files: HEVC/x265, HDR10, and Dolby or DTS audio. In the Dispatcharr web player these start, stall, or freeze even though the stream is healthy. When enabled, the plugin checks each file the web player opens and converts only files the browser cannot play into H.264/AAC on the fly. Files a browser already plays, and every other app (VLC, Emby, Jellyfin, TiviMate, Kodi), are never transcoded. Seeking is limited while transcoding."
+    },
+    {
+      "id": "browser_transcode",
+      "label": "Browser Transcoding",
+      "type": "boolean",
+      "default": false,
+      "help_text": "Only used by the Dispatcharr web player, and only for files the browser cannot play. Off by default."
+    },
+    {
+      "id": "transcode_encoder",
+      "label": "Transcode Encoder",
+      "type": "select",
+      "default": "auto",
+      "options": [
+        {
+          "value": "auto",
+          "label": "Auto-detect (recommended)"
+        },
+        {
+          "value": "nvenc",
+          "label": "NVIDIA (NVENC)"
+        },
+        {
+          "value": "qsv",
+          "label": "Intel (Quick Sync)"
+        },
+        {
+          "value": "vaapi",
+          "label": "AMD / Intel (VAAPI)"
+        },
+        {
+          "value": "cpu",
+          "label": "CPU only (libx264)"
+        }
+      ],
+      "help_text": "Auto tests NVIDIA, Intel, then AMD/VAAPI and falls back to CPU."
+    },
+    {
+      "id": "vaapi_device",
+      "label": "VAAPI / QSV Render Device",
+      "type": "string",
+      "default": "/dev/dri/renderD128"
+    },
+    {
+      "id": "ffmpeg_path",
+      "label": "FFmpeg Path",
+      "type": "string",
+      "default": "/usr/local/bin/ffmpeg"
+    },
+    {
+      "id": "transcode_max_streams",
+      "label": "Max Simultaneous Transcodes",
+      "type": "number",
+      "default": 2
     }
   ],
   "actions": [
@@ -61,6 +121,14 @@
       "label": "Repair Integration",
       "description": "Reinstall routes and relation hooks and ensure the synthetic account exists.",
       "button_label": "Repair",
+      "button_variant": "outlined",
+      "button_color": "gray"
+    },
+    {
+      "id": "transcode_test",
+      "label": "Test Transcoding",
+      "description": "Test which hardware encoders (NVIDIA, Intel, AMD/VAAPI) or the CPU can transcode on this system.",
+      "button_label": "Test",
       "button_variant": "outlined",
       "button_color": "gray"
     }
