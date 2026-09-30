@@ -1,5 +1,9 @@
 # Decypharr VOD for Dispatcharr
 
+<p align="center">
+  <img src="logo.png" alt="Decypharr VOD" width="240">
+</p>
+
 **Version:** 1.0.0  
 **Author:** Tw1zT3d2four7
 
