@@ -1627,7 +1627,7 @@ def _release_group(value):
     m = TRAILING_GROUP_RE.search(value)
     if m:
         return m.group(0).strip()[2:].strip()
-    m = re.search(r"(?i)s+[([A-Za-z0-9][A-Za-z0-9._-]{1,30})]s*$", value)
+    m = re.search(r"(?i)\s+\[([A-Za-z0-9][A-Za-z0-9._-]{1,30})\]\s*$", value)
     return m.group(1) if m else ""
 
 
