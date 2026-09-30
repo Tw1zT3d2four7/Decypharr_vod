@@ -1717,7 +1717,7 @@ def _api_child_files(base, token, release):
     return _api_paginated(url, token)
 
 
-def _discover_media(root, api_url=None, api_token=None):
+def _discover_media(root, api_url=None, api_token=None, batch_callback=None, batch_size=200):
     if not api_url or not api_token:
         return []
 
@@ -1758,7 +1758,7 @@ def _discover_media(root, api_url=None, api_token=None):
             cached_meta[h] = sig
 
     if missing:
-        with ThreadPoolExecutor(max_workers=max(1, min(8, int((settings or {}).get("api_workers", API_WORKERS) or API_WORKERS)))) as pool:
+        with ThreadPoolExecutor(max_workers=max(1, min(8, int(API_WORKERS or 4)))) as pool:
             futures = [pool.submit(fetch, release) for release in missing]
             for future in as_completed(futures):
                 h, files = future.result()
@@ -1807,6 +1807,14 @@ def _discover_media(root, api_url=None, api_token=None):
                 "release_name": release_name,
                 "file_name": name,
             })
+
+    if batch_callback and batch_size > 0:
+        # Replay the completed discovery in bounded batches. This keeps the
+        # initial catalog import moving while the full inventory is still
+        # being assembled, instead of making users wait for the entire
+        # library before the first .strm objects are created.
+        for start in range(0, len(discovered), int(batch_size)):
+            batch_callback(discovered[start:start + int(batch_size)])
 
     return discovered
 
@@ -2372,6 +2380,69 @@ def _start_auto_scan(plugin):
         AUTO_SCAN_THREAD.start()
 
 
+def _link_next_episode_metadata(account):
+    """
+    Store deterministic next-episode information on every Decypharr episode.
+
+    Dispatcharr's current VOD frontend does not consume this field yet, but
+    keeping it on the relation makes the ordering/playback contract available
+    without changing stream IDs. Final episodes are explicitly marked so a
+    future player can stop at the end of the season.
+    """
+    rels = list(
+        M3UEpisodeRelation.objects.filter(
+            m3u_account=account,
+            series_relation__isnull=False,
+        ).select_related("episode", "series_relation__series").order_by(
+            "series_relation__series_id",
+            "episode__season_number",
+            "episode__episode_number",
+            "id",
+        )
+    )
+    grouped = {}
+    for rel in rels:
+        key = rel.series_relation.series_id if rel.series_relation else None
+        if key is not None:
+            grouped.setdefault(key, []).append(rel)
+
+    changed = 0
+    for items in grouped.values():
+        for index, rel in enumerate(items):
+            ep = rel.episode
+            props = dict(rel.custom_properties or {})
+            if index + 1 < len(items):
+                nxt = items[index + 1]
+                # Only auto-advance inside the same season. The end of a
+                # season is a deliberate stopping point for this feature.
+                if nxt.episode.season_number == ep.season_number:
+                    props.update({
+                        "decypharr_next_episode_id": nxt.id,
+                        "decypharr_next_episode_uuid": str(nxt.episode.uuid),
+                        "decypharr_next_season": int(nxt.episode.season_number),
+                        "decypharr_next_episode": int(nxt.episode.episode_number),
+                        "decypharr_season_final": False,
+                    })
+                else:
+                    props.pop("decypharr_next_episode_id", None)
+                    props.pop("decypharr_next_episode_uuid", None)
+                    props.pop("decypharr_next_season", None)
+                    props.pop("decypharr_next_episode", None)
+                    props["decypharr_season_final"] = True
+            else:
+                props.pop("decypharr_next_episode_id", None)
+                props.pop("decypharr_next_episode_uuid", None)
+                props.pop("decypharr_next_season", None)
+                props.pop("decypharr_next_episode", None)
+                props["decypharr_season_final"] = True
+
+            if props != (rel.custom_properties or {}):
+                rel.custom_properties = props
+                rel.save(update_fields=["custom_properties"])
+                changed += 1
+    return changed
+
+
 def _scan(plugin, force=False, background=False, fast=False, enrich_only=False):
     if not SCAN_LOCK.acquire(blocking=False):
         return {"status": "busy"}
@@ -2421,8 +2492,82 @@ def _scan(plugin, force=False, background=False, fast=False, enrich_only=False):
             "skipped": 0,
         }
 
-        media = _discover_media(root, API_BASE_URL, API_TOKEN)
+        progressive_fast = bool(
+            fast
+            or (
+                _stored_inventory_signature() is None
+                and settings.get("fast_initial_scan", True)
+            )
+        )
+        progressive_seen = {
+            "movies": set(),
+            "episodes": set(),
+            "series": set(),
+            "series_relations": set(),
+            "files": set(),
+        }
+
+        def progressive_batch(batch):
+            if not progressive_fast or enrich_only:
+                return
+            batch = _dedupe_discovered_media(batch)
+            for item in batch:
+                try:
+                    _fast_import_item(
+                        account,
+                        item,
+                        lib,
+                        progressive_seen["files"],
+                        progressive_seen["movies"],
+                        progressive_seen["episodes"],
+                        progressive_seen["series"],
+                        progressive_seen["series_relations"],
+                    )
+                except Exception:
+                    LOG.exception(
+                        "Decypharr VOD: progressive fast import failed for %s",
+                        item.get("path"),
+                    )
+
+        media = _discover_media(
+            root,
+            API_BASE_URL,
+            API_TOKEN,
+            batch_callback=progressive_batch if progressive_fast else None,
+            batch_size=max(25, min(1000, int(settings.get("progressive_batch_size", 200) or 200))),
+        )
         media = _dedupe_discovered_media(media)
+
+        if progressive_fast and not enrich_only:
+            inventory_signature = _inventory_signature(media)
+            _cleanup_library(lib, progressive_seen["files"])
+            M3UMovieRelation.objects.filter(m3u_account=account).exclude(
+                id__in=progressive_seen["movies"]
+            ).delete()
+            M3UEpisodeRelation.objects.filter(m3u_account=account).exclude(
+                id__in=progressive_seen["episodes"]
+            ).delete()
+            M3USeriesRelation.objects.filter(m3u_account=account).exclude(
+                id__in=progressive_seen["series_relations"]
+            ).delete()
+            metadata_state = {
+                "inventory_signature": inventory_signature,
+                "pending": [_media_state_key(item) for item in media if item.get("api_url")],
+                "updated": time.time(),
+            }
+            _metadata_state_save(metadata_state)
+            _link_next_episode_metadata(account)
+
+        _store_inventory_signature(inventory_signature)
+            _link_next_episode_metadata(account)
+            return {
+                "status": "ok",
+                "mode": "fast_initial_progressive",
+                "message": "Fast initial catalog is ready; metadata enrichment will continue in small background batches.",
+                "movies": len(progressive_seen["movies"]),
+                "episodes": len(progressive_seen["episodes"]),
+                "discovered": len(media),
+            }
 
         inventory_signature = _inventory_signature(media)
         metadata_state = _metadata_state_load()
@@ -2439,7 +2584,7 @@ def _scan(plugin, force=False, background=False, fast=False, enrich_only=False):
 
         fast = bool(fast or (first_inventory and cfg.get("fast_initial", True)))
 
-        if fast and not enrich_only:
+        if fast and not enrich_only and not progressive_fast:
             LOG.info("Decypharr VOD: fast initial import started for %d objects", len(media))
 
             season_groups = {}
@@ -3807,6 +3952,8 @@ class Plugin:
          "help_text": "First import builds the playable catalog without remote FFprobe/TMDB probing. Metadata, genres, artwork and technical details are enriched afterward in small background batches."},
         {"id": "metadata_batch_size", "label": "Metadata Enrichment Batch Size", "type": "number", "default": 10,
          "help_text": "Titles enriched per background pass. Lower values minimize impact on active VOD playback."},
+        {"id": "progressive_batch_size", "label": "Progressive Import Batch Size", "type": "number", "default": 200,
+         "help_text": "Number of discovered media items imported at a time during the initial scan. Smaller values make the catalog appear sooner while reducing database bursts."},
         {"id": "api_workers", "label": "Decypharr API Workers", "type": "number", "default": 4,
          "help_text": "Parallel Decypharr inventory requests. Lower values reduce network pressure on active playback; 4 is the default for large libraries."},
         {"id": "transcode_info", "label": "About Browser Transcoding", "type": "info", "help_text": 'Browsers cannot play many common files: HEVC/x265, HDR10, and Dolby or DTS audio. In the Dispatcharr web player these start, stall, or freeze even though the stream is healthy. When enabled, the plugin checks each file the web player opens and converts only files the browser cannot play into H.264/AAC on the fly. Files a browser already plays, and every other app (VLC, Emby, Jellyfin, TiviMate, Kodi), are never transcoded. Seeking is limited while transcoding.'},
