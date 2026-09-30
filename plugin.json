@@ -1,7 +1,7 @@
 {
   "name": "Decypharr VOD",
-  "version": "0.5.2",
-  "description": "Imports Decypharr media as native Dispatcharr VOD with a normalized .strm library, FFprobe technical metadata, genre metadata, artwork, and optional TMDB enrichment, plus optional hardware-accelerated transcoding for the Dispatcharr web player.",
+  "version": "1.0.0",
+  "description": "Imports Decypharr media as native Dispatcharr VOD with a normalized .strm library, TMDB genre categories, reliable background scanning, refresh protection for the synthetic XC account, FFprobe metadata, artwork, and optional hardware-accelerated browser transcoding.",
   "author": "Tw1zT3d2four7",
   "fields": [
     {
@@ -111,7 +111,7 @@
     {
       "id": "scan",
       "label": "Scan Decypharr",
-      "description": "Scan Decypharr API and rebuild the normalized presentation library.",
+      "description": "Scan Decypharr API and update the normalized presentation library. Automatic background scanning also runs at the configured interval.",
       "button_label": "Scan Now",
       "button_variant": "filled",
       "button_color": "blue"
