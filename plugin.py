@@ -19,7 +19,7 @@ try:
 except ImportError:  # pragma: no cover - Dispatcharr runs on Linux
     fcntl = None
 
-from django.db import transaction, close_old_connections
+from django.db import connection, transaction, close_old_connections
 from django.http import FileResponse, Http404, HttpResponse, StreamingHttpResponse
 from django.urls import path
 from django.utils import timezone
@@ -2559,7 +2559,7 @@ def _scan(plugin, force=False, background=False, fast=False, enrich_only=False):
             _metadata_state_save(metadata_state)
             _link_next_episode_metadata(account)
 
-        _store_inventory_signature(inventory_signature)
+            _store_inventory_signature(inventory_signature)
             _link_next_episode_metadata(account)
             return {
                 "status": "ok",
