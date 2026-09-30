@@ -552,6 +552,42 @@ def _tmdb_tv(api_key, title, year):
     return _tmdb(api_key, "tv/%s" % best["id"], {"append_to_response": "credits,external_ids"}) or best
 
 
+def _preferred_audio_code(settings=None):
+    """Return the configured ISO-639 language code; English is the public default."""
+    settings = settings if isinstance(settings, dict) else {}
+    value = str(settings.get("preferred_audio_language") or "eng").strip().lower()
+    if value in ("", "original", "source", "first"):
+        return "original"
+    aliases = {
+        "english": "eng", "spanish": "spa", "french": "fra", "german": "deu",
+        "italian": "ita", "portuguese": "por", "japanese": "jpn", "korean": "kor",
+        "chinese": "zho", "hindi": "hin", "arabic": "ara",
+    }
+    return aliases.get(value, value[:8])
+
+
+def _preferred_audio_stream(audio_tracks, preferred="eng"):
+    """Choose the preferred audio stream while retaining every source track."""
+    tracks = list(audio_tracks or [])
+    if not tracks:
+        return None
+    wanted = str(preferred or "eng").strip().lower()
+    aliases = {
+        "eng": "en", "spa": "es", "fra": "fr", "deu": "de", "ita": "it",
+        "por": "pt", "jpn": "ja", "kor": "ko", "zho": "zh", "hin": "hi",
+        "ara": "ar",
+    }
+    if wanted not in ("original", "source", "first"):
+        for track in tracks:
+            lang = str(track.get("language") or "").lower()
+            if lang == wanted or lang == aliases.get(wanted):
+                return track
+    for track in tracks:
+        if track.get("default"):
+            return track
+    return tracks[0]
+
+
 def _ffprobe(path, exe):
     if not shutil.which(exe) and not os.path.exists(exe):
         return {"error": "ffprobe not found"}
@@ -572,11 +608,30 @@ def _ffprobe(path, exe):
                 x.update({"width": st.get("width"), "height": st.get("height"), "fps": st.get("r_frame_rate"), "pix_fmt": st.get("pix_fmt"), "hdr": st.get("color_transfer"), "profile": st.get("profile")})
                 videos.append(x)
             elif st.get("codec_type") == "audio":
-                x.update({"channels": st.get("channels"), "sample_rate": st.get("sample_rate"), "bitrate": st.get("bit_rate")})
+                disposition = st.get("disposition") or {}
+                x.update({
+                    "channels": st.get("channels"),
+                    "sample_rate": st.get("sample_rate"),
+                    "bitrate": st.get("bit_rate"),
+                    "default": bool(disposition.get("default")),
+                    "forced": bool(disposition.get("forced")),
+                    "original": bool(disposition.get("original")),
+                    "dub": bool(disposition.get("dub")),
+                })
                 audios.append(x)
             elif st.get("codec_type") == "subtitle":
                 subs.append(x)
-        return {"duration": float((raw.get("format") or {}).get("duration") or 0), "bitrate": int((raw.get("format") or {}).get("bit_rate") or 0), "format": (raw.get("format") or {}).get("format_name"), "title": ((raw.get("format") or {}).get("tags") or {}).get("title") or "", "video": videos, "audio": audios, "subtitles": subs}
+        preferred = _preferred_audio_stream(audios, _preferred_audio_code(_fresh_plugin_settings()))
+        return {
+            "duration": float((raw.get("format") or {}).get("duration") or 0),
+            "bitrate": int((raw.get("format") or {}).get("bit_rate") or 0),
+            "format": (raw.get("format") or {}).get("format_name"),
+            "title": ((raw.get("format") or {}).get("tags") or {}).get("title") or "",
+            "video": videos,
+            "audio": audios,
+            "preferred_audio": preferred,
+            "subtitles": subs,
+        }
     except Exception as e:
         return {"error": str(e)}
 
@@ -3525,6 +3580,7 @@ def _tx_settings(force=False):
         "ffmpeg_path": str(raw.get("ffmpeg_path") or "").strip(),
         "ffprobe_path": str(raw.get("ffprobe_path") or "").strip(),
         "max_streams": max(1, max_streams),
+        "preferred_audio_language": _preferred_audio_code(raw),
     }
     _TX_CFG["ts"] = now
     _TX_CFG["cfg"] = cfg
@@ -3681,11 +3737,11 @@ def _tx_active_count():
 
 
 def _tx_probe(ffprobe, url):
-    """Probe the source. Returns {"video", "audio", "format"} or None when unreadable."""
+    """Probe the source and retain every audio track for preferred-language selection."""
     cmd = [
         ffprobe, "-hide_banner", "-v", "error", "-user_agent", TX_UA,
         "-show_entries",
-        "stream=codec_type,codec_name,profile,pix_fmt,color_transfer:format=format_name",
+        "stream=index,codec_type,codec_name,profile,pix_fmt,color_transfer:stream_tags=language,title:stream_disposition=default,forced,original,dub:format=format_name",
         "-of", "json", url,
     ]
     try:
@@ -3702,8 +3758,21 @@ def _tx_probe(ffprobe, url):
     )
     if not video:
         return None
-    audio = next((s for s in streams if s.get("codec_type") == "audio"), None)
-    return {"video": video, "audio": audio, "format": (data.get("format") or {}).get("format_name", "")}
+    audio_tracks = [s for s in streams if s.get("codec_type") == "audio"]
+    for track in audio_tracks:
+        tags = track.get("tags") or {}
+        track["language"] = tags.get("language")
+        track["title"] = tags.get("title")
+        track["default"] = bool((track.get("disposition") or {}).get("default"))
+        track["forced"] = bool((track.get("disposition") or {}).get("forced"))
+    preferred = _preferred_audio_stream(audio_tracks, _preferred_audio_code(_fresh_plugin_settings()))
+    return {
+        "video": video,
+        "audio": preferred,
+        "audio_tracks": audio_tracks,
+        "preferred_audio": preferred,
+        "format": (data.get("format") or {}).get("format_name", ""),
+    }
 
 
 def _tx_probe_cached(ffprobe, url, cache_key):
@@ -3788,16 +3857,18 @@ def _tx_kill_matching(tag):
     return total
 
 
-def _tx_build_cmd(ffmpeg, encoder, cfg, src_url, hdr, tag=TX_MARK):
+def _tx_build_cmd(ffmpeg, encoder, cfg, src_url, hdr, audio_index=None, tag=TX_MARK):
     pre, suffix, codec = _tx_encoder_parts(encoder, cfg["vaapi_device"])
     vf = ",".join(["scale=-2:'min(1080,ih)'", TX_TONEMAP if hdr else "format=yuv420p"]) + suffix
+    audio_map = "0:a:0?" if audio_index is None else "0:%s?" % int(audio_index)
     return (
         [ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin"]
         + pre
-        + ["-user_agent", TX_UA, "-i", src_url, "-map", "0:v:0", "-map", "0:a:0?", "-sn", "-dn", "-vf", vf]
+        + ["-user_agent", TX_UA, "-i", src_url, "-map", "0:v:0", "-map", audio_map, "-sn", "-dn", "-vf", vf]
         + codec
         + [
             "-c:a", "aac", "-ac", "2", "-b:a", "192k",
+            "-disposition:a:0", "default",
             "-max_muxing_queue_size", "1024",
             "-metadata", "comment=" + tag,
             "-movflags", "+frag_keyframe+empty_moov+default_base_moof",
@@ -3984,8 +4055,13 @@ def _tx_maybe(request, kwargs):
         # Last resort for ffmpeg builds without the tone-mapping filters:
         # washed-out colours are better than no picture.
         attempts.append((encoders[-1], False))
+    preferred_audio = _preferred_audio_stream(
+        info.get("audio_tracks") or ([info.get("audio")] if info.get("audio") else []),
+        cfg.get("preferred_audio_language") or "eng",
+    )
+    preferred_audio_index = preferred_audio.get("index") if preferred_audio else None
     for encoder, use_tonemap in attempts:
-        cmd = _tx_build_cmd(ffmpeg, encoder, cfg, src_url, use_tonemap, tag)
+        cmd = _tx_build_cmd(ffmpeg, encoder, cfg, src_url, use_tonemap, preferred_audio_index, tag)
         proc, first, err = _tx_spawn(cmd)
         if proc:
             LOG.info(
@@ -4172,6 +4248,22 @@ class Plugin:
         {"id": "tmdb_api_key", "label": "TMDB API Key", "type": "string", "default": ""},
         {"id": "metadata_enabled", "label": "TMDB Metadata", "type": "boolean", "default": True},
         {"id": "ffprobe_path", "label": "FFprobe Path", "type": "string", "default": "/usr/local/bin/ffprobe"},
+        {"id": "preferred_audio_language", "label": "Preferred Audio Language", "type": "select", "default": "eng",
+         "options": [
+             {"value": "eng", "label": "English"},
+             {"value": "spa", "label": "Spanish"},
+             {"value": "fra", "label": "French"},
+             {"value": "deu", "label": "German"},
+             {"value": "ita", "label": "Italian"},
+             {"value": "por", "label": "Portuguese"},
+             {"value": "jpn", "label": "Japanese"},
+             {"value": "kor", "label": "Korean"},
+             {"value": "zho", "label": "Chinese"},
+             {"value": "hin", "label": "Hindi"},
+             {"value": "ara", "label": "Arabic"},
+             {"value": "original", "label": "Source Default / First Available"}
+         ],
+         "help_text": "Preferred audio language when multiple tracks exist. If unavailable, the source default track is used, then the first available track. Direct-play sources are not remuxed just to change the default."},
         {"id": "scan_interval", "label": "Auto Scan Interval (seconds)", "type": "number", "default": 60},
         {"id": "fast_initial_scan", "label": "Fast Initial Scan", "type": "boolean", "default": True,
          "help_text": "First import builds the playable catalog without remote FFprobe/TMDB probing. Metadata, genres, artwork and technical details are enriched afterward in small background batches."},
