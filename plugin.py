@@ -4038,68 +4038,80 @@ def _cleanup_vod_database():
     """
     Destructive VOD reset for the plugin Actions tab.
 
-    Deletes the same VOD tables used by the documented manual cleanup
-    command, then immediately verifies the resulting row counts.
-    M3UAccount rows are intentionally preserved so the synthetic
-    Decypharr VOD account remains available for the plugin to recreate/use.
+    Use Django's ORM instead of hard-coded SQL table names.  Dispatcharr's
+    VOD app has changed table naming across releases, while the model
+    classes remain the stable interface.  Relations are deleted first so
+    foreign-key rows cannot survive the reset.  M3UAccount rows are
+    intentionally preserved.
     """
-    tables = [
-        "vod_m3uepisoderelation",
-        "vod_m3umovierelation",
-        "vod_m3useriesrelation",
-        "vod_m3uvodcategoryrelation",
-        "vod_episode",
-        "vod_movie",
-        "vod_series",
-        "vod_vodcategory",
-        "vod_vodlogo",
-    ]
-
     deleted = {}
     try:
         with transaction.atomic():
-            with connection.cursor() as cursor:
-                for table in tables:
-                    cursor.execute("DELETE FROM %s" % table)
-                    deleted[table] = cursor.rowcount
-
-        counts = {
-            "Movies": Movie.objects.count(),
-            "Series": Series.objects.count(),
-            "Episodes": Episode.objects.count(),
-            "Movie relations": M3UMovieRelation.objects.count(),
-            "Series relations": M3USeriesRelation.objects.count(),
-            "Episode relations": M3UEpisodeRelation.objects.count(),
-            "Category relations": M3UVODCategoryRelation.objects.count(),
-            "Categories": VODCategory.objects.count(),
-            "Logos": VODLogo.objects.count(),
-            "M3U accounts": M3UAccount.objects.count(),
-        }
-
-        verified_empty = all(
-            counts[name] == 0
-            for name in (
-                "Movies",
-                "Series",
-                "Episodes",
-                "Movie relations",
-                "Series relations",
-                "Episode relations",
-                "Category relations",
-                "Categories",
-                "Logos",
+            # Delete relation rows first.
+            relation_models = (
+                ("Episode relations", M3UEpisodeRelation),
+                ("Movie relations", M3UMovieRelation),
+                ("Series relations", M3USeriesRelation),
+                ("Category relations", M3UVODCategoryRelation),
             )
-        )
+            object_models = (
+                ("Episodes", Episode),
+                ("Movies", Movie),
+                ("Series", Series),
+                ("Categories", VODCategory),
+                ("Logos", VODLogo),
+            )
+
+            for label, model in relation_models + object_models:
+                count, _ = model.objects.all().delete()
+                deleted[label] = count
+                LOG.info(
+                    "Decypharr VOD cleanup: %s deleted %d rows",
+                    label,
+                    count,
+                )
+
+            # Make sure the transaction is actually visible before reporting
+            # success.  Use the same ORM models that Dispatcharr uses.
+            verification = {
+                "Movies": Movie.objects.count(),
+                "Series": Series.objects.count(),
+                "Episodes": Episode.objects.count(),
+                "Movie relations": M3UMovieRelation.objects.count(),
+                "Series relations": M3USeriesRelation.objects.count(),
+                "Episode relations": M3UEpisodeRelation.objects.count(),
+                "Category relations": M3UVODCategoryRelation.objects.count(),
+                "Categories": VODCategory.objects.count(),
+                "Logos": VODLogo.objects.count(),
+                "M3U accounts": M3UAccount.objects.count(),
+            }
+
+            empty = all(
+                verification[name] == 0
+                for name in (
+                    "Movies",
+                    "Series",
+                    "Episodes",
+                    "Movie relations",
+                    "Series relations",
+                    "Episode relations",
+                    "Category relations",
+                    "Categories",
+                    "Logos",
+                )
+            )
+
+            if not empty:
+                raise RuntimeError(
+                    "VOD cleanup verification failed: %s"
+                    % verification
+                )
 
         return {
-            "status": "ok" if verified_empty else "error",
-            "message": (
-                "VOD DATABASE CLEANUP COMPLETE"
-                if verified_empty
-                else "VOD DATABASE CLEANUP FINISHED BUT VERIFICATION FOUND REMAINING VOD ROWS"
-            ),
+            "status": "ok",
+            "message": "VOD DATABASE CLEANUP COMPLETE",
             "deleted": deleted,
-            "verification": counts,
+            "verification": verification,
         }
     except Exception as exc:
         LOG.exception("Decypharr VOD: VOD database cleanup failed")
@@ -4108,7 +4120,6 @@ def _cleanup_vod_database():
             "message": "VOD database cleanup failed: %s" % exc,
             "deleted": deleted,
         }
-
 
 def _tx_test(cfg):
     """Human-readable encoder test report for the 'Test Transcoding' action."""
