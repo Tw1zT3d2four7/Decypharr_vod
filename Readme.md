@@ -697,3 +697,36 @@ Decypharr owns the media.
 Dispatcharr owns the VOD presentation.
 
 Decypharr VOD connects the two through a normalized, API-backed presentation layer.
+
+
+## Large-Library Initial Scan
+
+v1.0.0 is designed for large Usenet-style libraries.
+
+The initial import uses a **progressive fast pass**. Decypharr inventory discovery is emitted
+to the importer in bounded batches instead of waiting for the entire library to finish
+before importing anything.
+
+The fast pass avoids FFprobe and TMDB requests. It creates the playable VOD catalog first.
+Metadata enrichment then runs separately in small batches.
+
+Settings:
+
+* **Fast Initial Scan** — enabled by default
+* **Progressive Import Batch Size** — 200 by default
+* **Metadata Enrichment Batch Size** — 10 by default
+* **Decypharr API Workers** — 4 by default
+* **Auto Scan Interval** — continues to control background change detection
+
+The intent is to keep database, Decypharr API, FFprobe, and TMDB activity from monopolizing
+resources while a user is watching VOD.
+
+## Series Playback Metadata
+
+v1.0.0 records deterministic next-episode metadata on each Decypharr episode relation.
+The next episode is linked only within the same season; the final episode of a season is
+explicitly marked as the season boundary.
+
+This backend metadata is intentionally separate from Dispatcharr's player UI. Native
+automatic playback requires the Dispatcharr frontend video player to consume the next
+episode field; the plugin does not replace Dispatcharr's frontend bundle.
