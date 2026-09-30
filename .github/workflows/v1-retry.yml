@@ -1,0 +1,31 @@
+name: v1.0.0 retry failed finalizer
+
+on:
+  push:
+    branches: [v1.0.0]
+
+permissions:
+  contents: write
+
+jobs:
+  retry:
+    if: ${{ !contains(github.event.head_commit.message, '[v1.0.0-retry]') && !contains(github.event.head_commit.message, '[v1.0.0-finalize]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: v1.0.0
+          fetch-depth: 1
+      - name: Re-run finalizer with unambiguous branch ref
+        shell: python
+        run: |
+          from pathlib import Path
+          import subprocess
+          import textwrap
+          import yaml
+
+          workflow = yaml.safe_load(Path('.github/workflows/v1-finalize.yml').read_text())
+          steps = workflow['jobs']['finalize']['steps']
+          runner_step = next(step for step in steps if step.get('name') == 'Apply bounded-memory scanner and docs')
+          script = runner_step['run'].replace("HEAD:v1.0.0", "HEAD:refs/heads/v1.0.0")
+          exec(compile(textwrap.dedent(script), 'v1-finalize.yml', 'exec'), {'__name__': '__main__'})
