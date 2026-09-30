@@ -143,7 +143,7 @@ def _release_normalize(value):
 
     value = value.replace("_", " ")
     value = value.replace(".", " ")
-    value = re.sub(r"\\s+", " ", value)
+    value = re.sub(r"\s+", " ", value)
     return value.strip()
 
 def _strip_release_group(value):
@@ -892,7 +892,7 @@ def _account():
 
 
 def _category(account, name, kind):
-    name = re.sub(r"\\s+", " ", str(name or "")).strip()
+    name = re.sub(r"\s+", " ", str(name or "")).strip()
     if not name:
         return None
 
@@ -928,7 +928,7 @@ def _tmdb_genres(data):
     names = []
     seen = set()
     for genre in data.get("genres") or []:
-        name = re.sub(r"\\s+", " ", str((genre or {}).get("name") or "")).strip()
+        name = re.sub(r"\s+", " ", str((genre or {}).get("name") or "")).strip()
         key = name.casefold()
         if name and key not in seen:
             seen.add(key)
