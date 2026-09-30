@@ -1776,6 +1776,7 @@ def _discover_media(root, api_url=None, api_token=None, batch_callback=None, bat
     discovered = []
     virtual_root = os.path.realpath(root)
     os.makedirs(virtual_root, exist_ok=True)
+    pending_batch = []
 
     for h, release in current.items():
         release_name = _api_release_name(release) or h
@@ -1797,7 +1798,7 @@ def _discover_media(root, api_url=None, api_token=None, batch_callback=None, bat
                 [_api_file_name(x) for x in files if _api_file_name(x)],
             )
             kind = "episode" if epi else ("season_file" if tv_release else "movie")
-            discovered.append({
+            item = {
                 "kind": kind,
                 "path": virtual,
                 "api_url": api_path,
@@ -1806,15 +1807,15 @@ def _discover_media(root, api_url=None, api_token=None, batch_callback=None, bat
                 "file_path": file_path,
                 "release_name": release_name,
                 "file_name": name,
-            })
+            }
+            discovered.append(item)
+            pending_batch.append(item)
+            if batch_callback and batch_size > 0 and len(pending_batch) >= int(batch_size):
+                batch_callback(pending_batch)
+                pending_batch = []
 
-    if batch_callback and batch_size > 0:
-        # Replay the completed discovery in bounded batches. This keeps the
-        # initial catalog import moving while the full inventory is still
-        # being assembled, instead of making users wait for the entire
-        # library before the first .strm objects are created.
-        for start in range(0, len(discovered), int(batch_size)):
-            batch_callback(discovered[start:start + int(batch_size)])
+    if batch_callback and pending_batch:
+        batch_callback(pending_batch)
 
     return discovered
 
