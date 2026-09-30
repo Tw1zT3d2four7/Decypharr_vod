@@ -1126,6 +1126,12 @@ def _sync_episode_genre_relations(
             "decypharr_info_hash": item.get("info_hash"),
             "decypharr_file_path": item.get("file_path"),
             "ffprobe": probe,
+                        "preferred_audio_language": _preferred_audio_code(_fresh_plugin_settings()),
+                        "preferred_audio_stream": (probe or {}).get("preferred_audio"),
+                        "preferred_audio_language": _preferred_audio_code(_fresh_plugin_settings()),
+                        "preferred_audio_stream": (probe or {}).get("preferred_audio"),
+                        "preferred_audio_language": _preferred_audio_code(_fresh_plugin_settings()),
+                        "preferred_audio_stream": (probe or {}).get("preferred_audio"),
             "season_number": season,
             "episode_number": number,
         })
