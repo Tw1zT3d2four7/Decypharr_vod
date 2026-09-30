@@ -1717,7 +1717,7 @@ def _api_child_files(base, token, release):
     return _api_paginated(url, token)
 
 
-def _discover_media(root, api_url=None, api_token=None, batch_callback=None, batch_size=200):
+def _discover_media(root, api_url=None, api_token=None, batch_callback=None, batch_size=200, collect=True, inventory_digest_callback=None):
     if not api_url or not api_token:
         return []
 
@@ -1781,6 +1781,7 @@ def _discover_media(root, api_url=None, api_token=None, batch_callback=None, bat
     for h, release in current.items():
         release_name = _api_release_name(release) or h
         files = cached_files.get(h) or []
+        release_items = []
         for child in files:
             name = _api_file_name(child)
             if not name:
@@ -1808,8 +1809,15 @@ def _discover_media(root, api_url=None, api_token=None, batch_callback=None, bat
                 "release_name": release_name,
                 "file_name": name,
             }
-            discovered.append(item)
+            release_items.append(item)
+
+        release_items = _normalize_season_pack_items(release_items)
+        for item in release_items:
             pending_batch.append(item)
+            if inventory_digest_callback:
+                inventory_digest_callback(_inventory_item_digest(item))
+            if collect:
+                discovered.append(item)
             if batch_callback and batch_size > 0 and len(pending_batch) >= int(batch_size):
                 batch_callback(pending_batch)
                 pending_batch = []
@@ -2205,6 +2213,67 @@ def _media_state_key(item):
     ).hexdigest()
 
 
+def _inventory_item_digest(item):
+    row = {
+        "kind": item.get("kind"),
+        "path": os.path.realpath(str(item.get("path") or "")),
+        "api_url": item.get("api_url") or "",
+        "info_hash": item.get("info_hash") or "",
+        "file_path": item.get("file_path") or "",
+        "file_name": item.get("file_name") or "",
+        "release_name": item.get("release_name") or "",
+        "episode": list(item.get("episode") or []),
+    }
+    return hashlib.sha256(json.dumps(row, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")).digest()
+
+
+def _inventory_signature_from_digests(digests):
+    accumulator = bytearray(32)
+    for digest in digests:
+        for index, value in enumerate(digest):
+            accumulator[index] ^= value
+    return bytes(accumulator).hex()
+
+
+METADATA_QUEUE_FILE = os.path.join(STATE_DIR, "metadata_queue.jsonl")
+
+
+def _metadata_queue_reset():
+    os.makedirs(STATE_DIR, exist_ok=True)
+    tmp = METADATA_QUEUE_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8"):
+        pass
+    os.replace(tmp, METADATA_QUEUE_FILE)
+
+
+def _metadata_queue_append(item):
+    os.makedirs(STATE_DIR, exist_ok=True)
+    payload = {k: item.get(k) for k in ("kind", "path", "api_url", "episode", "info_hash", "file_path", "release_name", "file_name", "season_pack")}
+    with open(METADATA_QUEUE_FILE, "a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n")
+
+
+def _metadata_queue_batch(offset=0, limit=10):
+    items=[]
+    try:
+        with open(METADATA_QUEUE_FILE, encoding="utf-8") as handle:
+            handle.seek(max(0, int(offset or 0)))
+            while len(items) < max(1, int(limit or 1)):
+                line=handle.readline()
+                if not line: return items, handle.tell()
+                try: item=json.loads(line)
+                except Exception: continue
+                if isinstance(item, dict) and item.get("api_url"): items.append(item)
+            return items, handle.tell()
+    except FileNotFoundError:
+        return [], 0
+
+
+def _metadata_queue_has_items(offset=0):
+    try: return os.path.getsize(METADATA_QUEUE_FILE) > max(0, int(offset or 0))
+    except OSError: return False
+
+
 def _metadata_state_load():
     try:
         with open(METADATA_STATE_FILE, encoding="utf-8") as handle:
@@ -2590,111 +2659,31 @@ def _scan(plugin, force=False, background=False, fast=False, enrich_only=False):
             "series_relations": set(),
             "files": set(),
         }
-
-        def progressive_batch(batch):
-            if not progressive_fast or enrich_only:
-                return
-
-            # Only import classifications that are already structurally
-            # certain.  season_file entries require the complete release
-            # inventory before episode numbers can be assigned, so they are
-            # deliberately deferred until _discover_media() has finished.
-            batch = _dedupe_discovered_media(batch)
-            for item in batch:
-                if item.get("kind") == "season_file":
-                    continue
-
-                try:
-                    _fast_import_item(
-                        account,
-                        item,
-                        lib,
-                        progressive_seen["files"],
-                        progressive_seen["movies"],
-                        progressive_seen["episodes"],
-                        progressive_seen["series"],
-                        progressive_seen["series_relations"],
-                    )
-                except Exception:
-                    LOG.exception(
-                        "Decypharr VOD: progressive fast import failed for %s",
-                        item.get("path"),
-                    )
-
-        media = _discover_media(
-            root,
-            API_BASE_URL,
-            API_TOKEN,
-            batch_callback=progressive_batch if progressive_fast else None,
-            batch_size=max(25, min(1000, int(settings.get("progressive_batch_size", 200) or 200))),
-        )
-        media = _dedupe_discovered_media(media)
-
+        progressive_digests = []
         if progressive_fast and not enrich_only:
-            # Now that the complete inventory is known, resolve season packs
-            # before importing the deferred TV items.  This is intentionally
-            # after discovery so a release cannot be split across progressive
-            # batches and assigned the wrong episode numbers.
-            media = _normalize_season_pack_items(media)
-
-            deferred_seen = {
-                "movies": progressive_seen["movies"],
-                "episodes": progressive_seen["episodes"],
-                "series": progressive_seen["series"],
-                "series_relations": progressive_seen["series_relations"],
-                "files": progressive_seen["files"],
-            }
-
-            for item in media:
-                if item.get("kind") != "episode" or item.get("path") in (None, ""):
-                    continue
-                if os.path.realpath(str(item.get("path"))) in progressive_seen["files"]:
-                    continue
-                try:
-                    _fast_import_item(
-                        account,
-                        item,
-                        lib,
-                        deferred_seen["files"],
-                        deferred_seen["movies"],
-                        deferred_seen["episodes"],
-                        deferred_seen["series"],
-                        deferred_seen["series_relations"],
-                    )
-                except Exception:
-                    LOG.exception(
-                        "Decypharr VOD: deferred season-pack import failed for %s",
-                        item.get("path"),
-                    )
-
-            inventory_signature = _inventory_signature(media)
+            inventory_signature = _inventory_signature_from_digests(progressive_digests)
             _cleanup_library(lib, progressive_seen["files"])
-            M3UMovieRelation.objects.filter(m3u_account=account).exclude(
-                id__in=progressive_seen["movies"]
-            ).delete()
-            M3UEpisodeRelation.objects.filter(m3u_account=account).exclude(
-                id__in=progressive_seen["episodes"]
-            ).delete()
-            M3USeriesRelation.objects.filter(m3u_account=account).exclude(
-                id__in=progressive_seen["series_relations"]
-            ).delete()
+            M3UMovieRelation.objects.filter(m3u_account=account).exclude(id__in=progressive_seen["movies"]).delete()
+            M3UEpisodeRelation.objects.filter(m3u_account=account).exclude(id__in=progressive_seen["episodes"]).delete()
+            M3USeriesRelation.objects.filter(m3u_account=account).exclude(id__in=progressive_seen["series_relations"]).delete()
+            _cleanup_legacy_categories(account)
             metadata_state = {
                 "inventory_signature": inventory_signature,
-                "pending": [_media_state_key(item) for item in media if item.get("api_url")],
+                "pending": [],
+                "pending_queue": "metadata_queue.jsonl",
+                "queue_offset": 0,
                 "updated": time.time(),
             }
             _metadata_state_save(metadata_state)
             _link_next_episode_metadata(account)
-
             _store_inventory_signature(inventory_signature)
-            _link_next_episode_metadata(account)
             return {
                 "status": "ok",
                 "mode": "fast_initial_progressive",
-                "message": "Fast initial catalog is ready; metadata enrichment will continue in small background batches.",
+                "message": "Fast initial catalog is ready; metadata enrichment is queued in bounded batches.",
                 "movies": len(progressive_seen["movies"]),
                 "episodes": len(progressive_seen["episodes"]),
-                "discovered": len(media),
+                "discovered": len(progressive_seen["movies"]) + len(progressive_seen["episodes"]),
             }
 
         inventory_signature = _inventory_signature(media)
@@ -2702,7 +2691,8 @@ def _scan(plugin, force=False, background=False, fast=False, enrich_only=False):
         first_inventory = _stored_inventory_signature() is None
 
         if background and not force and inventory_signature == _stored_inventory_signature():
-            if not (metadata_state.get("pending") or []):
+            queue_offset = int(metadata_state.get("queue_offset") or 0)
+            if not (metadata_state.get("pending") or []) and not _metadata_queue_has_items(queue_offset):
                 return {
                     "status": "unchanged",
                     "message": "No Decypharr media changes detected; scan skipped.",
@@ -2778,16 +2768,22 @@ def _scan(plugin, force=False, background=False, fast=False, enrich_only=False):
                 "discovered": len(media),
             }
 
+        queue_items = []
+        queue_next_offset = int(metadata_state.get("queue_offset") or 0)
         if enrich_only:
-            pending = set(metadata_state.get("pending") or [])
-            if not pending:
-                return {"status": "unchanged", "message": "Metadata enrichment is complete."}
             batch_size = max(1, int(cfg.get("metadata_batch_size", 25) or 25))
-            selected = []
-            for item in media:
-                if _media_state_key(item) in pending and len(selected) < batch_size:
-                    selected.append(item)
-            media = selected
+            if _metadata_queue_has_items(queue_next_offset):
+                queue_items, queue_next_offset = _metadata_queue_batch(queue_next_offset, batch_size)
+                media = queue_items
+            else:
+                pending = set(metadata_state.get("pending") or [])
+                if not pending:
+                    return {"status": "unchanged", "message": "Metadata enrichment is complete."}
+                selected = []
+                for item in media:
+                    if _media_state_key(item) in pending and len(selected) < batch_size:
+                        selected.append(item)
+                media = selected
             LOG.info("Decypharr VOD: metadata enrichment batch %d", len(media))
 
         # Season packs often contain obfuscated child filenames. Assign
@@ -3325,9 +3321,17 @@ def _scan(plugin, force=False, background=False, fast=False, enrich_only=False):
                 )
 
         if enrich_only:
+            if queue_items:
+                metadata_state["queue_offset"] = queue_next_offset
+                metadata_state["queue_updated"] = time.time()
             metadata_state["inventory_signature"] = inventory_signature
             metadata_state["updated"] = time.time()
             _metadata_state_save(metadata_state)
+            remaining_queue = 0
+            try:
+                remaining_queue = max(0, os.path.getsize(METADATA_QUEUE_FILE) - int(metadata_state.get("queue_offset") or 0))
+            except OSError:
+                pass
             return {
                 "status": "ok",
                 "mode": "metadata_enrichment",
@@ -3335,6 +3339,7 @@ def _scan(plugin, force=False, background=False, fast=False, enrich_only=False):
                 "episodes": counts["episodes"],
                 "skipped": counts["skipped"],
                 "remaining": len(metadata_state.get("pending") or []),
+                "queue_bytes_remaining": remaining_queue,
             }
 
         # ================================================================

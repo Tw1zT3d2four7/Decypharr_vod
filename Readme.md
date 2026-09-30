@@ -4,7 +4,7 @@
   <img src="logo.png" alt="Decypharr VOD" width="240">
 </p>
 
-**Version:** 1.0.0  
+**Version:** 1.0.0
 **Author:** Tw1zT3d2four7
 
 Decypharr VOD imports media managed by **Decypharr** into Dispatcharr as native VOD content.
@@ -551,3 +551,16 @@ This branch is **v1.0.0**.
 All versioned plugin metadata and documentation in this branch should remain at **1.0.0 / v1.0.0** until a deliberate version bump is made.
 
 `main` is not modified by this branch.
+
+
+## Large Usenet-Style Library Scanner
+
+v1.0.0 is designed for very large Usenet-style Decypharr libraries. The initial scan uses a **true progressive, bounded-memory import path**: releases are classified independently, season packs are resolved before their batch is emitted, and playable Dispatcharr VOD records are created without retaining the complete media inventory in Python memory.
+
+The progressive path no longer performs a second whole-library season-pack pass. Each release is normalized before it reaches the import callback, preventing obfuscated season-pack files from being misclassified as movies while also avoiding a full-library deferred list.
+
+Fast-import records are placed into a persistent metadata queue. Expensive FFprobe/TMDB enrichment is processed in small batches after the playable catalog is available. This keeps the scan responsive and reduces the chance that a large initial scan interferes with active VOD playback.
+
+The persistent Decypharr API inventory cache reuses unchanged release child inventories, and changed releases are fetched concurrently according to the **Decypharr API Workers** setting. The scanner also folds a compact inventory signature instead of retaining the complete media objects solely to calculate a scan signature.
+
+Automatic scanning, manual Scan Now, metadata enrichment, and stale-library cleanup continue to use the same plugin-owned relations and `.strm` presentation library. A scan lock prevents overlapping scans from modifying the VOD database at the same time.
