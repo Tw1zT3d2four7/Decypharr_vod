@@ -561,15 +561,6 @@ Do not continue scanning until the reported verification result is understood. T
 
 ---
 
-# Version
-
-This branch is **v1.0.0**.
-
-All versioned plugin metadata and documentation in this branch should remain at **1.0.0 / v1.0.0** until a deliberate version bump is made.
-
-`main` is not modified by this branch.
-
-
 ## Large Usenet-Style Library Scanner
 
 v1.0.0 is designed for very large Usenet-style Decypharr libraries. The initial scan uses a **true progressive, bounded-memory import path**: releases are classified independently, season packs are resolved before their batch is emitted, and playable Dispatcharr VOD records are created without retaining the complete media inventory in Python memory.
