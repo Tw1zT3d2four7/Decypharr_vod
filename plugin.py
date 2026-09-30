@@ -14,6 +14,11 @@ import urllib.error
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Dispatcharr runs on Linux
+    fcntl = None
+
 from django.db import transaction
 from django.http import FileResponse, Http404, HttpResponse, StreamingHttpResponse
 from django.urls import path
@@ -47,6 +52,12 @@ PREFIX = "decypharr-"
 ROUTE_INSTALLED = False
 PATCHED = False
 SCAN_LOCK = threading.Lock()
+SCAN_PROCESS_LOCK_PATH = os.path.join(STATE_DIR, "scan.lock")
+INVENTORY_STATE_FILE = os.path.join(STATE_DIR, "inventory_state.json")
+AUTO_SCAN_THREAD = None
+AUTO_SCAN_STOP = threading.Event()
+AUTO_SCAN_START_LOCK = threading.Lock()
+REFRESH_GUARDS_PATCHED = False
 
 VIDEO_EXTS = {".mkv", ".mp4", ".m4v", ".avi", ".mov", ".ts", ".m2ts", ".webm", ".wmv", ".flv", ".strm"}
 # ================================================================
@@ -491,7 +502,7 @@ def _tmdb(api_key, endpoint, params):
     cached = _json_cache(key)
     if cached is not None:
         return cached
-    req = urllib.request.Request(url, headers={"User-Agent": "Decypharr-VOD/0.5.2"})
+    req = urllib.request.Request(url, headers={"User-Agent": "Decypharr-VOD/1.0.0"})
     for attempt in range(3):
         try:
             with urllib.request.urlopen(req, timeout=15) as r:
@@ -645,7 +656,7 @@ def _proxy_api_file(request, api_url):
 
     headers = {
         "Authorization": "Bearer %s" % api_token,
-        "User-Agent": "Dispatcharr-Decypharr-VOD/0.5.2",
+        "User-Agent": "Dispatcharr-Decypharr-VOD/1.0.0",
     }
     rng = request.headers.get("Range")
     if rng:
@@ -811,7 +822,7 @@ def _patch_relations():
                     headers["Authorization"] = "Bearer %s" % token
                     headers.setdefault(
                         "User-Agent",
-                        "Dispatcharr-Decypharr-VOD/0.5.2",
+                        "Dispatcharr-Decypharr-VOD/1.0.0",
                     )
 
                     LOG.info(
@@ -844,17 +855,318 @@ def _patch_relations():
     LOG.info("Decypharr VOD native Dispatcharr VOD hooks installed.")
 
 def _account():
+    """
+    Ensure the synthetic XC account is always active.
+
+    Dispatcharr's VOD relation layer requires an XC account, but this account
+    is not a real upstream provider and must never be allowed to refresh
+    against the placeholder 127.0.0.1 server.
+    """
     a = M3UAccount.objects.filter(name=ACCOUNT_NAME).first()
     if a:
+        changed = []
+        props = dict(a.custom_properties or {})
+        if not props.get(MARKER):
+            props[MARKER] = True
+            a.custom_properties = props
+            changed.append("custom_properties")
+        if not a.is_active:
+            a.is_active = True
+            changed.append("is_active")
+        if changed:
+            a.save(update_fields=list(dict.fromkeys(changed)))
         return a
-    a = M3UAccount.objects.create(name=ACCOUNT_NAME, account_type=M3UAccount.Types.XC, server_url="http://127.0.0.1", username="decypharr", password="disabled", file_path=LIBRARY_ROOT, is_active=False, priority=10000, max_streams=0, custom_properties={MARKER: True})
-    return a
+
+    return M3UAccount.objects.create(
+        name=ACCOUNT_NAME,
+        account_type=M3UAccount.Types.XC,
+        server_url="http://127.0.0.1",
+        username="decypharr",
+        password="disabled",
+        file_path=LIBRARY_ROOT,
+        is_active=True,
+        priority=10000,
+        max_streams=0,
+        custom_properties={MARKER: True},
+    )
 
 
 def _category(account, name, kind):
-    c, _ = VODCategory.objects.get_or_create(name=name, category_type=kind)
-    M3UVODCategoryRelation.objects.get_or_create(m3u_account=account, category=c, defaults={"enabled": True, "custom_properties": {MARKER: True}})
+    name = re.sub(r"\\s+", " ", str(name or "")).strip()
+    if not name:
+        return None
+
+    # Reuse an existing category case-insensitively so repeated scans never
+    # create Action/action-style duplicates.
+    c = VODCategory.objects.filter(
+        category_type=kind,
+        name__iexact=name,
+    ).first()
+    if c is None:
+        c = VODCategory.objects.create(name=name, category_type=kind)
+
+    rel, _ = M3UVODCategoryRelation.objects.get_or_create(
+        m3u_account=account,
+        category=c,
+        defaults={
+            "enabled": True,
+            "custom_properties": {MARKER: True},
+        },
+    )
+    props = dict(rel.custom_properties or {})
+    if not props.get(MARKER) or not rel.enabled:
+        props[MARKER] = True
+        rel.enabled = True
+        rel.custom_properties = props
+        rel.save(update_fields=["enabled", "custom_properties"])
     return c
+
+
+def _tmdb_genres(data):
+    if not data:
+        return []
+    names = []
+    seen = set()
+    for genre in data.get("genres") or []:
+        name = re.sub(r"\\s+", " ", str((genre or {}).get("name") or "")).strip()
+        key = name.casefold()
+        if name and key not in seen:
+            seen.add(key)
+            names.append(name)
+    return names
+
+
+def _genre_slug(name):
+    slug = re.sub(r"[^a-z0-9]+", "-", str(name or "").casefold()).strip("-")
+    return slug or "genre"
+
+
+def _genre_stream_id(base_id, genre_name):
+    suffix = "--genre-" + _genre_slug(genre_name)
+    if len(base_id) + len(suffix) <= 255:
+        return base_id + suffix
+    digest = hashlib.sha1(genre_name.encode("utf-8", "ignore")).hexdigest()[:12]
+    return base_id[:255 - len(suffix) - 13] + "-" + digest + suffix
+
+
+def _genre_categories(account, data, kind):
+    names = _tmdb_genres(data)
+    return [(name, _category(account, name, kind)) for name in names]
+
+
+def _sync_movie_genre_relations(account, movie, base_rel, genre_categories):
+    """
+    Represent every TMDB genre as a Dispatcharr category relation while
+    keeping one canonical Movie object.  Dispatcharr's relation schema has
+    one category FK per relation, so additional category copies use unique
+    provider relation IDs and point at the same canonical Movie.
+    """
+    names = [name for name, category in genre_categories if category]
+    categories = [category for name, category in genre_categories if category]
+    props = dict(base_rel.custom_properties or {})
+    props["decypharr_genres"] = names
+    props[MARKER] = True
+
+    if categories:
+        base_rel.category = categories[0]
+    else:
+        base_rel.category = None
+    base_rel.custom_properties = props
+    base_rel.save(update_fields=["category", "custom_properties"])
+
+    relation_ids = [base_rel.id]
+    for name, category in genre_categories[1:]:
+        stream_id = _genre_stream_id(base_rel.stream_id, name)
+        rel, _ = M3UMovieRelation.objects.get_or_create(
+            m3u_account=account,
+            stream_id=stream_id,
+            defaults={
+                "movie": movie,
+                "category": category,
+                "container_extension": base_rel.container_extension,
+                "custom_properties": {},
+            },
+        )
+        rel.movie = movie
+        rel.category = category
+        rel.container_extension = base_rel.container_extension
+        rp = dict(base_rel.custom_properties or {})
+        rp.update({
+            MARKER: True,
+            "decypharr_genre_relation": True,
+            "decypharr_genre": name,
+        })
+        rel.custom_properties = rp
+        rel.last_seen = timezone.now()
+        rel.save()
+        relation_ids.append(rel.id)
+    return relation_ids
+
+
+def _sync_series_genre_relations(account, series, base_rel, genre_categories):
+    names = [name for name, category in genre_categories if category]
+    categories = [category for name, category in genre_categories if category]
+    props = dict(base_rel.custom_properties or {})
+    props["decypharr_genres"] = names
+    props[MARKER] = True
+    base_rel.category = categories[0] if categories else None
+    base_rel.custom_properties = props
+    base_rel.save(update_fields=["category", "custom_properties"])
+
+    relations = [(names[0], base_rel)] if names else [(None, base_rel)]
+    for name, category in genre_categories[1:]:
+        external_id = "%s-genre-%s" % (base_rel.external_series_id, _genre_slug(name))
+        rel, _ = M3USeriesRelation.objects.get_or_create(
+            m3u_account=account,
+            external_series_id=external_id,
+            defaults={
+                "series": series,
+                "category": category,
+                "custom_properties": {},
+            },
+        )
+        rel.series = series
+        rel.category = category
+        rp = dict(base_rel.custom_properties or {})
+        rp.update({
+            MARKER: True,
+            "decypharr_genre_relation": True,
+            "decypharr_genre": name,
+        })
+        rel.custom_properties = rp
+        rel.last_episode_refresh = timezone.now()
+        rel.save()
+        relations.append((name, rel))
+    return relations
+
+
+def _sync_episode_genre_relations(
+    account, episode, base_rel, series_relations, path, api_url, item, probe, season, number, seen_eps
+):
+    for name, series_rel in series_relations:
+        if series_rel.id == base_rel.series_relation_id:
+            continue
+        stream_id = _genre_stream_id(base_rel.stream_id, name)
+        er, _ = M3UEpisodeRelation.objects.get_or_create(
+            m3u_account=account,
+            stream_id=stream_id,
+            defaults={
+                "episode": episode,
+                "series_relation": series_rel,
+                "container_extension": base_rel.container_extension,
+                "custom_properties": {},
+            },
+        )
+        er.episode = episode
+        er.series_relation = series_rel
+        er.container_extension = base_rel.container_extension
+        ep_props = dict(base_rel.custom_properties or {})
+        ep_props.update({
+            MARKER: True,
+            "decypharr_genre_relation": True,
+            "decypharr_genre": name,
+            "decypharr_path": path,
+            "decypharr_api_url": api_url,
+            "decypharr_info_hash": item.get("info_hash"),
+            "decypharr_file_path": item.get("file_path"),
+            "ffprobe": probe,
+            "season_number": season,
+            "episode_number": number,
+        })
+        er.custom_properties = ep_props
+        er.last_seen = timezone.now()
+        er.save()
+        seen_eps.add(er.id)
+
+
+def _cleanup_legacy_categories(account):
+    for name in ("Decypharr Movies", "Decypharr TV"):
+        for category in VODCategory.objects.filter(name=name):
+            M3UVODCategoryRelation.objects.filter(
+                m3u_account=account,
+                category=category,
+            ).delete()
+            if not M3UVODCategoryRelation.objects.filter(category=category).exists():
+                category.delete()
+
+
+def _is_synthetic_account(account_id):
+    try:
+        return M3UAccount.objects.filter(
+            id=account_id,
+            custom_properties__decypharr_vod=True,
+        ).exists()
+    except Exception:
+        return False
+
+
+def _patch_refresh_guards():
+    """
+    Keep the synthetic XC account active for VOD relations while making every
+    normal Dispatcharr refresh path a successful no-op for that account.
+    """
+    global REFRESH_GUARDS_PATCHED
+    if REFRESH_GUARDS_PATCHED:
+        return True
+
+    try:
+        from apps.m3u import tasks as m3u_tasks
+
+        def guard_task(task, account_arg="account_id", profile_arg=None, result=None, label="refresh"):
+            original = getattr(task, "run", None)
+            if original is None:
+                return
+            attr = "_decypharr_original_run_" + label
+            if hasattr(task, attr):
+                return
+            setattr(task, attr, original)
+
+            def guarded(*args, **kwargs):
+                value = kwargs.get(account_arg)
+                if value is None and args:
+                    value = args[0]
+                if profile_arg is not None:
+                    try:
+                        from apps.m3u.models import M3UAccountProfile
+                        profile_id = kwargs.get(profile_arg)
+                        if profile_id is None and args:
+                            profile_id = args[0]
+                        profile = M3UAccountProfile.objects.select_related("m3u_account").filter(id=profile_id).first()
+                        if profile and _is_synthetic_account(profile.m3u_account_id):
+                            LOG.info("Decypharr VOD: intercepted synthetic XC %s for profile %s", label, profile_id)
+                            return result() if callable(result) else result
+                    except Exception:
+                        LOG.exception("Decypharr VOD: refresh guard profile lookup failed")
+                elif value is not None and _is_synthetic_account(value):
+                    LOG.info("Decypharr VOD: intercepted synthetic XC %s for account %s", label, value)
+                    return result() if callable(result) else result
+                return original(*args, **kwargs)
+
+            task.run = guarded
+
+        guard_task(
+            m3u_tasks.refresh_single_m3u_account,
+            result=lambda: "Decypharr VOD synthetic account refresh skipped.",
+            label="refresh_single_m3u_account",
+        )
+        guard_task(
+            m3u_tasks.refresh_m3u_groups,
+            result=lambda: ("Decypharr VOD synthetic account group refresh skipped.", None),
+            label="refresh_m3u_groups",
+        )
+        guard_task(
+            m3u_tasks.refresh_account_info,
+            profile_arg="profile_id",
+            result=lambda: "Decypharr VOD synthetic account information refresh skipped.",
+            label="refresh_account_info",
+        )
+
+        REFRESH_GUARDS_PATCHED = True
+        LOG.info("Decypharr VOD: synthetic XC refresh guards installed.")
+        return True
+    except Exception:
+        LOG.exception("Decypharr VOD: could not install synthetic XC refresh guards")
+        return False
 
 
 def _find_movie(name, year, tmdb_id=None):
@@ -1281,7 +1593,7 @@ def _tv_blu_ray_episode_candidates(files):
 def _api_json(url, token, params=None, timeout=30):
     q = urllib.parse.urlencode(params or {})
     full = url + (("&" if "?" in url else "?") + q if q else "")
-    req = urllib.request.Request(full, headers={"Authorization": "Bearer %s" % token, "Accept": "application/json", "User-Agent": "Dispatcharr-Decypharr-VOD/0.5.2"})
+    req = urllib.request.Request(full, headers={"Authorization": "Bearer %s" % token, "Accept": "application/json", "User-Agent": "Dispatcharr-Decypharr-VOD/1.0.0"})
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.loads(r.read().decode("utf-8"))
 
@@ -1776,8 +2088,125 @@ def _dedupe_discovered_media(media):
     return list(selected.values())
 
 
-def _scan(plugin):
+def _fresh_plugin_settings():
+    try:
+        from apps.plugins.models import PluginConfig
+        config = PluginConfig.objects.filter(key=PLUGIN_KEY).first()
+        if config:
+            settings = getattr(config, "settings", {}) or {}
+            return dict(settings) if isinstance(settings, dict) else {}
+    except Exception:
+        LOG.exception("Decypharr VOD: failed to read live plugin settings")
+    return {}
+
+
+def _inventory_signature(media):
+    rows = []
+    for item in media:
+        rows.append({
+            "kind": item.get("kind"),
+            "path": os.path.realpath(str(item.get("path") or "")),
+            "api_url": item.get("api_url") or "",
+            "info_hash": item.get("info_hash") or "",
+            "file_path": item.get("file_path") or "",
+            "file_name": item.get("file_name") or "",
+            "release_name": item.get("release_name") or "",
+            "episode": list(item.get("episode") or []),
+        })
+    rows.sort(key=lambda x: json.dumps(x, sort_keys=True, ensure_ascii=False))
+    raw = json.dumps(rows, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _stored_inventory_signature():
+    try:
+        with open(INVENTORY_STATE_FILE, encoding="utf-8") as handle:
+            data = json.load(handle)
+        return data.get("signature")
+    except Exception:
+        return None
+
+
+def _store_inventory_signature(signature):
+    os.makedirs(STATE_DIR, exist_ok=True)
+    tmp = INVENTORY_STATE_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as handle:
+        json.dump({"signature": signature, "updated": time.time()}, handle)
+    os.replace(tmp, INVENTORY_STATE_FILE)
+
+
+def _scan_process_lock():
+    os.makedirs(STATE_DIR, exist_ok=True)
+    handle = open(SCAN_PROCESS_LOCK_PATH, "a+")
+    if fcntl is None:
+        return handle
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        handle.close()
+        return None
+    return handle
+
+
+def _scan_process_unlock(handle):
+    if not handle:
+        return
+    try:
+        if fcntl is not None:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    finally:
+        handle.close()
+
+
+def _auto_scan_loop(plugin):
+    LOG.info("Decypharr VOD: background auto-scan worker started.")
+    while not AUTO_SCAN_STOP.is_set():
+        settings = _fresh_plugin_settings()
+        if settings:
+            plugin._settings = settings
+        try:
+            interval = float((settings or {}).get("scan_interval", 60) or 0)
+        except (TypeError, ValueError):
+            interval = 60
+
+        if interval > 0:
+            try:
+                result = _scan(plugin, force=False, background=True)
+                if result.get("status") not in ("ok", "unchanged", "busy"):
+                    LOG.warning("Decypharr VOD: background scan returned %s", result)
+            except Exception:
+                LOG.exception("Decypharr VOD: background scan failed")
+            wait_for = max(5, interval)
+        else:
+            wait_for = 30
+
+        AUTO_SCAN_STOP.wait(wait_for)
+
+    LOG.info("Decypharr VOD: background auto-scan worker stopped.")
+
+
+def _start_auto_scan(plugin):
+    global AUTO_SCAN_THREAD
+    with AUTO_SCAN_START_LOCK:
+        if AUTO_SCAN_THREAD is not None and AUTO_SCAN_THREAD.is_alive():
+            return
+        AUTO_SCAN_STOP.clear()
+        AUTO_SCAN_THREAD = threading.Thread(
+            target=_auto_scan_loop,
+            args=(plugin,),
+            name="decypharr-vod-auto-scan",
+            daemon=True,
+        )
+        AUTO_SCAN_THREAD.start()
+
+
+def _scan(plugin, force=False, background=False):
     if not SCAN_LOCK.acquire(blocking=False):
+        return {"status": "busy"}
+
+    process_lock = _scan_process_lock()
+    if process_lock is None:
+        SCAN_LOCK.release()
         return {"status": "busy"}
 
     try:
@@ -1802,12 +2231,13 @@ def _scan(plugin):
         os.makedirs(lib, exist_ok=True)
 
         account = _account()
-        movie_cat = _category(account, "Decypharr Movies", "movie")
-        tv_cat = _category(account, "Decypharr TV", "series")
+        movie_cat = None
+        tv_cat = None
 
         seen_movies = set()
         seen_eps = set()
         seen_series = set()
+        seen_series_relations = set()
         seen_files = set()
 
         counts = {
@@ -1818,6 +2248,14 @@ def _scan(plugin):
 
         media = _discover_media(root, API_BASE_URL, API_TOKEN)
         media = _dedupe_discovered_media(media)
+
+        inventory_signature = _inventory_signature(media)
+        if background and not force and inventory_signature == _stored_inventory_signature():
+            return {
+                "status": "unchanged",
+                "message": "No Decypharr media changes detected; scan skipped.",
+                "discovered": len(media),
+            }
 
         # Season packs often contain obfuscated child filenames. Assign
         # deterministic provisional episode numbers; embedded FFprobe
@@ -1898,6 +2336,8 @@ def _scan(plugin):
                         else None
                     )
 
+                    series_genre_categories = _genre_categories(account, data, "series")
+
                     if data and data.get("name"):
                         series_name = data["name"]
 
@@ -1924,12 +2364,20 @@ def _scan(plugin):
                             series.id,
                         ),
                         defaults={
-                            "category": tv_cat,
+                            "category": (
+                                series_genre_categories[0][1]
+                                if series_genre_categories
+                                else None
+                            ),
                             "custom_properties": {MARKER: True},
                         },
                     )
 
-                    rel.category = tv_cat
+                    rel.category = (
+                        series_genre_categories[0][1]
+                        if series_genre_categories
+                        else None
+                    )
                     rel.custom_properties = dict(rel.custom_properties or {})
                     rel.custom_properties.update({
                         MARKER: True,
@@ -1942,7 +2390,11 @@ def _scan(plugin):
                     rel.last_episode_refresh = timezone.now()
                     rel.save()
 
+                    series_relations = _sync_series_genre_relations(
+                        account, series, rel, series_genre_categories
+                    )
                     seen_series.add(series.id)
+                    seen_series_relations.update(srel.id for _, srel in series_relations)
 
                     # ----------------------------------------------------
                     # Episode metadata
@@ -2087,6 +2539,20 @@ def _scan(plugin):
 
                     er.save()
 
+                    _sync_episode_genre_relations(
+                        account,
+                        ep,
+                        er,
+                        series_relations,
+                        p,
+                        api_media_url,
+                        item,
+                        probe,
+                        season,
+                        number,
+                        seen_eps,
+                    )
+
                     # ----------------------------------------------------
                     # Locked TV .strm path
                     # ----------------------------------------------------
@@ -2185,6 +2651,8 @@ def _scan(plugin):
                         else None
                     )
 
+                    movie_genre_categories = _genre_categories(account, data, "movie")
+
                     if data and data.get("title"):
                         name = data["title"]
 
@@ -2218,7 +2686,11 @@ def _scan(plugin):
                         stream_id=stream_id,
                         defaults={
                             "movie": movie,
-                            "category": movie_cat,
+                            "category": (
+                                movie_genre_categories[0][1]
+                                if movie_genre_categories
+                                else None
+                            ),
                             "container_extension": (
                                 Path(p).suffix.lstrip(".") or "mp4"
                             ),
@@ -2227,7 +2699,11 @@ def _scan(plugin):
                     )
 
                     mr.movie = movie
-                    mr.category = movie_cat
+                    mr.category = (
+                        movie_genre_categories[0][1]
+                        if movie_genre_categories
+                        else None
+                    )
                     mr.container_extension = (
                         Path(p).suffix.lstrip(".") or "mp4"
                     )
@@ -2247,6 +2723,10 @@ def _scan(plugin):
                     })
 
                     mr.save()
+
+                    movie_relation_ids = _sync_movie_genre_relations(
+                        account, movie, mr, movie_genre_categories
+                    )
 
                     tech = mr.custom_properties.get("ffprobe") or {}
 
@@ -2300,7 +2780,7 @@ def _scan(plugin):
                     )
 
                     seen_files.add(os.path.realpath(out))
-                    seen_movies.add(mr.id)
+                    seen_movies.update(movie_relation_ids)
 
                     counts["movies"] += 1
 
@@ -2349,6 +2829,14 @@ def _scan(plugin):
             id__in=seen_eps,
         ).delete()
 
+        M3USeriesRelation.objects.filter(
+            m3u_account=account,
+        ).exclude(
+            id__in=seen_series_relations,
+        ).delete()
+
+        _cleanup_legacy_categories(account)
+
         # ================================================================
         # Remove plugin-owned orphan objects
         # ================================================================
@@ -2376,6 +2864,8 @@ def _scan(plugin):
             ).exists():
                 obj.delete()
 
+        _store_inventory_signature(inventory_signature)
+
         return {
             "status": "ok",
             "message": (
@@ -2391,6 +2881,7 @@ def _scan(plugin):
         }
 
     finally:
+        _scan_process_unlock(process_lock)
         SCAN_LOCK.release()
 
 
@@ -3020,7 +3511,7 @@ def _tx_test(cfg):
 
 class Plugin:
     name = "Decypharr VOD"
-    version = "0.5.2"
+    version = "1.0.0"
     description = "Imports Decypharr media as native Dispatcharr VOD with .strm presentation, FFprobe technical metadata, and optional TMDB metadata."
     author = "Tw1zT3d2four7"
     fields = [
@@ -3051,16 +3542,26 @@ class Plugin:
     ]
 
     def __init__(self):
-        self._settings = {}
-        _install_route(); _patch_relations(); _account(); _patch_transcode()
+        self._settings = _fresh_plugin_settings()
+        _install_route()
+        _patch_refresh_guards()
+        _patch_relations()
+        _account()
+        _patch_transcode()
+        _start_auto_scan(self)
 
     def run(self, action, params, context):
         self._settings = (context or {}).get("settings") or getattr(self, "_settings", {}) or {}
         if action == "repair":
-            _install_route(); _patch_relations(); _account(); _patch_transcode()
+            _install_route()
+            _patch_refresh_guards()
+            _patch_relations()
+            _account()
+            _patch_transcode()
+            _start_auto_scan(self)
             return {"status": "ok", "message": "Decypharr VOD integration repaired.", "route_installed": ROUTE_INSTALLED, "patched": PATCHED, "transcode_hook": _TX_PATCHED}
         if action == "transcode_test":
             return _tx_test(_tx_settings(force=True))
         if action == "scan":
-            return _scan(self)
+            return _scan(self, force=True, background=False)
         return {"status": "error", "message": "Unknown action: %s" % action}
