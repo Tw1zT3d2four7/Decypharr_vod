@@ -1,0 +1,131 @@
+name: v1.0.0 preferred audio language
+
+on:
+  push:
+    branches: [v1.0.0]
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: ${{ !contains(github.event.head_commit.message, '[audio-pref-finalize]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: v1.0.0
+          fetch-depth: 1
+      - name: Apply preferred audio language support
+        shell: python
+        run: |
+          from pathlib import Path
+          import json, re, subprocess
+
+          p = Path('plugin.py')
+          s = p.read_text()
+
+          helper = r'''\n\ndef _preferred_audio_code(settings=None):\n    """Return the configured ISO 639-2 audio preference.\n\n    Empty/original means keep the source default when possible.  The default\n    is English (eng), which is also the public-plugin default.\n    """\n    settings = settings if isinstance(settings, dict) else {}\n    value = str(settings.get("preferred_audio_language") or "eng").strip().lower()\n    if value in ("", "original", "source", "first"):\n        return "original"\n    return value[:8]\n\n\ndef _preferred_audio_stream(audio_tracks, preferred="eng"):\n    """Choose the preferred audio stream without removing alternatives."""\n    tracks = list(audio_tracks or [])\n    if not tracks:\n        return None\n    preferred = str(preferred or "eng").strip().lower()\n    if preferred not in ("original", "source", "first"):\n        exact = [t for t in tracks if str(t.get("language") or "").lower() == preferred]\n        if exact:\n            return exact[0]\n        # Some sources use ISO-639-1 tags (en) instead of ISO-639-2 (eng).\n        aliases = {"eng": "en", "spa": "es", "fra": "fr", "deu": "de", "ita": "it", "por": "pt", "jpn": "ja", "kor": "ko", "zho": "zh", "hin": "hi", "ara": "ar"}\n        alias = aliases.get(preferred)\n        if alias:\n            match = [t for t in tracks if str(t.get("language") or "").lower() == alias]\n            if match:\n                return match[0]\n    defaults = [t for t in tracks if t.get("default")]\n    return defaults[0] if defaults else tracks[0]\n'''
+          if 'def _preferred_audio_code(' not in s:
+              marker='\ndef _ffprobe(path, exe):'
+              if marker not in s: raise SystemExit('ffprobe anchor missing')
+              s=s.replace(marker,helper+marker,1)
+
+          old='''        streams = raw.get("streams", [])\n        videos, audios, subs = [], [], []\n        for st in streams:\n            x = {"index": st.get("index"), "codec": st.get("codec_name"), "language": (st.get("tags") or {}).get("language"), "title": (st.get("tags") or {}).get("title")}\n            if st.get("codec_type") == "video":\n                x.update({"width": st.get("width"), "height": st.get("height"), "fps": st.get("r_frame_rate"), "pix_fmt": st.get("pix_fmt"), "hdr": st.get("color_transfer"), "profile": st.get("profile")})\n                videos.append(x)\n            elif st.get("codec_type") == "audio":\n                x.update({"channels": st.get("channels"), "sample_rate": st.get("sample_rate"), "bitrate": st.get("bit_rate")})\n                audios.append(x)\n            elif st.get("codec_type") == "subtitle":\n                subs.append(x)\n        return {"duration": float((raw.get("format") or {}).get("duration") or 0), "bitrate": int((raw.get("format") or {}).get("bit_rate") or 0), "format": (raw.get("format") or {}).get("format_name"), "title": ((raw.get("format") or {}).get("tags") or {}).get("title") or "", "video": videos, "audio": audios, "subtitles": subs}'''
+          new='''        streams = raw.get("streams", [])\n        videos, audios, subs = [], [], []\n        for st in streams:\n            tags = st.get("tags") or {}\n            disposition = st.get("disposition") or {}\n            x = {\n                "index": st.get("index"),\n                "codec": st.get("codec_name"),\n                "language": str(tags.get("language") or "").lower() or None,\n                "title": tags.get("title"),\n                "default": bool(disposition.get("default")),\n                "forced": bool(disposition.get("forced")),\n                "original": bool(disposition.get("original")),\n                "dub": bool(disposition.get("dub")),\n            }\n            if st.get("codec_type") == "video":\n                x.update({"width": st.get("width"), "height": st.get("height"), "fps": st.get("r_frame_rate"), "pix_fmt": st.get("pix_fmt"), "hdr": st.get("color_transfer"), "profile": st.get("profile")})\n                videos.append(x)\n            elif st.get("codec_type") == "audio":\n                x.update({"channels": st.get("channels"), "sample_rate": st.get("sample_rate"), "bitrate": st.get("bit_rate")})\n                audios.append(x)\n            elif st.get("codec_type") == "subtitle":\n                subs.append(x)\n        preferred = _preferred_audio_stream(audios, "eng")\n        return {"duration": float((raw.get("format") or {}).get("duration") or 0), "bitrate": int((raw.get("format") or {}).get("bit_rate") or 0), "format": (raw.get("format") or {}).get("format_name"), "title": ((raw.get("format") or {}).get("tags") or {}).get("title") or "", "video": videos, "audio": audios, "preferred_audio": preferred, "subtitles": subs}'''
+          if old not in s: raise SystemExit('ffprobe block missing')
+          s=s.replace(old,new,1)
+
+          old='''def _tx_probe(ffprobe, url):\n    """Probe the source. Returns {"video", "audio", "format"} or None when unreadable."""\n    cmd = [\n        ffprobe, "-hide_banner", "-v", "error", "-user_agent", TX_UA,\n        "-show_entries",\n        "stream=codec_type,codec_name,profile,pix_fmt,color_transfer:format=format_name",\n        "-of", "json", url,\n    ]'''
+          new='''def _tx_probe(ffprobe, url):\n    """Probe source video/audio tracks, retaining language and default flags."""\n    cmd = [\n        ffprobe, "-hide_banner", "-v", "error", "-user_agent", TX_UA,\n        "-show_entries",\n        "stream=index,codec_type,codec_name,profile,pix_fmt,color_transfer,channels:stream_tags=language,title:stream_disposition=default,forced,original,dub:format=format_name",\n        "-of", "json", url,\n    ]'''
+          if old not in s: raise SystemExit('tx probe signature missing')
+          s=s.replace(old,new,1)
+
+          old='''    audio = next((s for s in streams if s.get("codec_type") == "audio"), None)\n    return {"video": video, "audio": audio, "format": (data.get("format") or {}).get("format_name", "")}'''
+          new='''    audio_tracks = []\n    for stream in streams:\n        if stream.get("codec_type") != "audio":\n            continue\n        tags = stream.get("tags") or {}\n        disp = stream.get("disposition") or {}\n        audio_tracks.append({\n            "index": stream.get("index"),\n            "codec_name": stream.get("codec_name"),\n            "channels": stream.get("channels"),\n            "language": str(tags.get("language") or "").lower() or None,\n            "title": tags.get("title"),\n            "default": bool(disp.get("default")),\n            "forced": bool(disp.get("forced")),\n            "original": bool(disp.get("original")),\n            "dub": bool(disp.get("dub")),\n        })\n    preferred = _preferred_audio_stream(audio_tracks, _preferred_audio_code(_fresh_plugin_settings()))\n    return {"video": video, "audio": preferred or (audio_tracks[0] if audio_tracks else None), "audio_tracks": audio_tracks, "preferred_audio": preferred, "format": (data.get("format") or {}).get("format_name", "")}'''
+          if old not in s: raise SystemExit('tx audio block missing')
+          s=s.replace(old,new,1)
+
+          old='''def _tx_build_cmd(ffmpeg, encoder, cfg, src_url, hdr, tag=TX_MARK):\n    pre, suffix, codec = _tx_encoder_parts(encoder, cfg["vaapi_device"])'''
+          new='''def _tx_build_cmd(ffmpeg, encoder, cfg, src_url, hdr, tag=TX_MARK, audio_index=None):\n    pre, suffix, codec = _tx_encoder_parts(encoder, cfg["vaapi_device"])'''
+          if old not in s: raise SystemExit('tx build signature missing')
+          s=s.replace(old,new,1)
+
+          old='''    return (\n        [ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin"]\n        + pre\n        + ["-user_agent", TX_UA, "-i", src_url, "-map", "0:v:0", "-map", "0:a:0?", "-sn", "-dn", "-vf", vf]\n        + codec'''
+          new='''    audio_map = "0:a:0?" if audio_index is None else "0:%s?" % int(audio_index)\n    return (\n        [ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin"]\n        + pre\n        + ["-user_agent", TX_UA, "-i", src_url, "-map", "0:v:0", "-map", audio_map, "-sn", "-dn", "-vf", vf]\n        + codec'''
+          if old not in s: raise SystemExit('tx map block missing')
+          s=s.replace(old,new,1)
+
+          old='''            "-c:a", "aac", "-ac", "2", "-b:a", "192k",\n            "-max_muxing_queue_size", "1024",'''
+          new='''            "-c:a", "aac", "-ac", "2", "-b:a", "192k",\n            "-disposition:a:0", "default",\n            "-max_muxing_queue_size", "1024",'''
+          if old not in s: raise SystemExit('tx audio output block missing')
+          s=s.replace(old,new,1)
+
+          old='''    hdr = str(info["video"].get("color_transfer") or "").lower() in TX_HDR_TRANSFERS\n\n    detected = _tx_detect(cfg, ffmpeg)'''
+          new='''    hdr = str(info["video"].get("color_transfer") or "").lower() in TX_HDR_TRANSFERS\n    preferred_audio = info.get("preferred_audio") or info.get("audio")\n    preferred_audio_index = preferred_audio.get("index") if preferred_audio else None\n\n    detected = _tx_detect(cfg, ffmpeg)'''
+          if old not in s: raise SystemExit('tx preferred insertion anchor missing')
+          s=s.replace(old,new,1)
+
+          old='''        cmd = _tx_build_cmd(ffmpeg, encoder, cfg, src_url, use_tonemap, tag)'''
+          new='''        cmd = _tx_build_cmd(ffmpeg, encoder, cfg, src_url, use_tonemap, tag, preferred_audio_index)'''
+          if old not in s: raise SystemExit('tx build call missing')
+          s=s.replace(old,new,1)
+
+          # Persist the selected language in the VOD relation metadata. This
+          # gives Dispatcharr/client integrations a stable preference record
+          # without deleting alternate audio tracks from the source.
+          marker='''                    er.custom_properties.update({\n                        MARKER: True,\n                        "decypharr_path": p,'''
+          replacement='''                    preferred_audio = _preferred_audio_stream(\n                        (probe or {}).get("audio") or [],\n                        _preferred_audio_code(settings),\n                    )\n                    er.custom_properties.update({\n                        MARKER: True,\n                        "preferred_audio_language": _preferred_audio_code(settings),\n                        "preferred_audio_stream": preferred_audio,\n                        "decypharr_path": p,'''
+          if marker not in s: raise SystemExit('episode relation anchor missing')
+          s=s.replace(marker,replacement,1)
+
+          marker='''                    mr.custom_properties.update({\n                        MARKER: True,\n                        "decypharr_path": p,'''
+          replacement='''                    preferred_audio = _preferred_audio_stream(\n                        (probe or {}).get("audio") or [],\n                        _preferred_audio_code(settings),\n                    )\n                    mr.custom_properties.update({\n                        MARKER: True,\n                        "preferred_audio_language": _preferred_audio_code(settings),\n                        "preferred_audio_stream": preferred_audio,\n                        "decypharr_path": p,'''
+          if marker not in s: raise SystemExit('movie relation anchor missing')
+          s=s.replace(marker,replacement,1)
+
+          # Fast imports explicitly remain cheap: no FFprobe is added there.
+          # The preferred track is populated during enrichment only.
+
+          p.write_text(s)
+
+          q=Path('plugin.json')
+          data=json.loads(q.read_text())
+          fields=data['fields']
+          if not any(x.get('id')=='preferred_audio_language' for x in fields):
+              insert_at=next(i for i,x in enumerate(fields) if x.get('id')=='ffprobe_path')+1
+              fields.insert(insert_at,{"id":"preferred_audio_language","label":"Preferred Audio Language","type":"select","default":"eng","options":[
+                  {"value":"eng","label":"English (eng)"},{"value":"spa","label":"Spanish (spa)"},{"value":"fra","label":"French (fra)"},{"value":"deu","label":"German (deu)"},{"value":"ita","label":"Italian (ita)"},{"value":"por","label":"Portuguese (por)"},{"value":"jpn","label":"Japanese (jpn)"},{"value":"kor","label":"Korean (kor)"},{"value":"zho","label":"Chinese (zho)"},{"value":"hin","label":"Hindi (hin)"},{"value":"ara","label":"Arabic (ara)"},{"value":"original","label":"Source Default / First Available"}],"help_text":"When multiple audio tracks exist, prefer this language. Other audio tracks remain available. If the selected language is missing, the source default is used, then the first available track."})
+          q.write_text(json.dumps(data,indent=2)+"\n")
+
+          r=Path('Readme.md')
+          text=r.read_text()
+          section='''\n## Preferred Audio Language\n\nv1.0.0 includes a configurable **Preferred Audio Language** setting. The default is **English (`eng`)**. The language codes follow ISO 639-2 conventions; for example, `eng` is English, `spa` Spanish, `fra` French, `deu` German, `jpn` Japanese, and `zho` Chinese. citeturn1search0\n\nWhen FFprobe enrichment finds multiple audio tracks, the plugin chooses the configured language when available. If it is not present, the fallback order is:\n\n1. The source-marked default audio track.\n2. The first available audio track.\n\nThe plugin **does not delete or hide the other audio tracks**. The selected track is stored in the plugin's VOD relation metadata, and browser transcoding uses that selected track when it creates its H.264/AAC output. FFmpeg supports explicit stream mapping and setting an output audio stream as the default. citeturn0search0turn0search1\n\nThis feature is intentionally part of the metadata/enrichment phase rather than the fast initial catalog pass, so enabling it does not add FFprobe work to the huge-library progressive discovery stage.\n\nFor users who want the source provider's own choice instead, select **Source Default / First Available**.\n\n**Important:** the underlying Decypharr source is not rewritten or remuxed just to change its audio default. Direct-play clients may apply their own remembered audio-language preference. The plugin's preferred track is guaranteed for the plugin's browser-transcoding path and is retained as metadata for integrations that consume the preference.\n'''
+          if '## Preferred Audio Language' not in text:
+              anchor='\n# Browser Transcoding\n'
+              if anchor in text: text=text.replace(anchor,section+anchor,1)
+              else: text += section
+          else:
+              a=text.index('## Preferred Audio Language'); b=text.find('\n## ',a+5); b=len(text) if b<0 else b
+              text=text[:a]+section.lstrip('\n')+text[b:]
+          text=re.sub(r'v0\\.\\d+(?:\\.\\d+)?','v1.0.0',text)
+          r.write_text(text)
+
+          # Keep the Python class settings in sync with plugin.json.
+          if '"id": "preferred_audio_language"' not in s:
+              marker='''        {"id": "ffprobe_path", "label": "FFprobe Path", "type": "string", "default": "/usr/local/bin/ffprobe"},'''
+              repl=marker+'''\n        {"id": "preferred_audio_language", "label": "Preferred Audio Language", "type": "select", "default": "eng", "options": [\n            {"value": "eng", "label": "English (eng)"},\n            {"value": "spa", "label": "Spanish (spa)"},\n            {"value": "fra", "label": "French (fra)"},\n            {"value": "deu", "label": "German (deu)"},\n            {"value": "ita", "label": "Italian (ita)"},\n            {"value": "por", "label": "Portuguese (por)"},\n            {"value": "jpn", "label": "Japanese (jpn)"},\n            {"value": "kor", "label": "Korean (kor)"},\n            {"value": "zho", "label": "Chinese (zho)"},\n            {"value": "hin", "label": "Hindi (hin)"},\n            {"value": "ara", "label": "Arabic (ara)"},\n            {"value": "original", "label": "Source Default / First Available"},\n        ], "help_text": "Preferred audio language when multiple tracks are present; other tracks remain available."},'''
+              if marker not in s: raise SystemExit('class fields anchor missing')
+              s=s.replace(marker,repl,1)
+              p.write_text(s)
+
+          subprocess.run(['python3','-m','py_compile','plugin.py'],check=True)
+          subprocess.run(['python3','-m','json.tool','plugin.json'],check=True,stdout=subprocess.DEVNULL)
+          subprocess.run(['git','config','user.name','github-actions[bot]'],check=True)
+          subprocess.run(['git','config','user.email','41898282+github-actions[bot]@users.noreply.github.com'],check=True)
+          subprocess.run(['git','add','plugin.py','plugin.json','Readme.md'],check=True)
+          subprocess.run(['git','commit','-m','[audio-pref-finalize] add configurable preferred audio language'],check=True)
+          subprocess.run(['git','push','origin','HEAD:refs/heads/v1.0.0'],check=True)
+          subprocess.run(['git','rm','-f','.github/workflows/audio-language-v1.yml'],check=True)
+          subprocess.run(['git','commit','-m','Remove temporary audio language workflow'],check=True)
+          subprocess.run(['git','push','origin','HEAD:refs/heads/v1.0.0'],check=True)
