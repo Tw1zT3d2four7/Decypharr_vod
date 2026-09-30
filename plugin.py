@@ -54,6 +54,7 @@ PATCHED = False
 SCAN_LOCK = threading.Lock()
 SCAN_PROCESS_LOCK_PATH = os.path.join(STATE_DIR, "scan.lock")
 INVENTORY_STATE_FILE = os.path.join(STATE_DIR, "inventory_state.json")
+METADATA_STATE_FILE = os.path.join(STATE_DIR, "metadata_state.json")
 AUTO_SCAN_THREAD = None
 AUTO_SCAN_STOP = threading.Event()
 AUTO_SCAN_START_LOCK = threading.Lock()
@@ -2100,6 +2101,174 @@ def _fresh_plugin_settings():
     return {}
 
 
+def _media_state_key(item):
+    return hashlib.sha1(
+        json.dumps({
+            "kind": item.get("kind"),
+            "api_url": item.get("api_url") or "",
+            "info_hash": item.get("info_hash") or "",
+            "file_path": item.get("file_path") or "",
+            "path": os.path.realpath(str(item.get("path") or "")),
+        }, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
+
+
+def _metadata_state_load():
+    try:
+        with open(METADATA_STATE_FILE, encoding="utf-8") as handle:
+            data = json.load(handle)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _metadata_state_save(data):
+    os.makedirs(STATE_DIR, exist_ok=True)
+    tmp = METADATA_STATE_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as handle:
+        json.dump(data, handle, ensure_ascii=False)
+    os.replace(tmp, METADATA_STATE_FILE)
+
+
+def _fast_import_item(account, item, lib, seen_files, seen_movies, seen_eps, seen_series, seen_series_relations):
+    p = item["path"]
+    api_media_url = item.get("api_url")
+    if not api_media_url:
+        return False
+
+    epi = item.get("episode")
+    if epi:
+        season, number = epi
+        release = _release_root(p, SOURCE_ROOT)
+        series_name = _series_title_from_path(p) or _release_title(release.name)
+        year = _year(str(release)) or _year(p)
+        series = _find_series(series_name, year, None)
+        if series is None:
+            series = Series.objects.create(name=series_name, year=year, custom_properties={MARKER: True})
+
+        rel, _ = M3USeriesRelation.objects.get_or_create(
+            m3u_account=account,
+            series=series,
+            external_series_id="%s-series-%s" % (MARKER, series.id),
+            defaults={"category": None, "custom_properties": {MARKER: True}},
+        )
+        props = dict(rel.custom_properties or {})
+        props.update({
+            MARKER: True,
+            "decypharr_path": p,
+            "decypharr_api_url": api_media_url,
+            "decypharr_info_hash": item.get("info_hash"),
+            "decypharr_file_path": item.get("file_path"),
+            "fast_import": True,
+        })
+        rel.custom_properties = props
+        rel.last_episode_refresh = timezone.now()
+        rel.save(update_fields=["custom_properties", "last_episode_refresh"])
+        seen_series.add(series.id)
+        seen_series_relations.add(rel.id)
+
+        ep = Episode.objects.filter(series=series, season_number=season, episode_number=number).first()
+        if ep is None:
+            ep = Episode.objects.create(
+                series=series,
+                season_number=season,
+                episode_number=number,
+                name=_episode_title(p) or "Episode %02d" % int(number),
+                custom_properties={MARKER: True, "fast_import": True},
+            )
+        ec = dict(ep.custom_properties or {})
+        ec.update({
+            MARKER: True,
+            "decypharr_path": p,
+            "decypharr_api_url": api_media_url,
+            "decypharr_info_hash": item.get("info_hash"),
+            "decypharr_file_path": item.get("file_path"),
+            "fast_import": True,
+        })
+        ep.custom_properties = ec
+        ep.save(update_fields=["custom_properties"])
+
+        stream_id = _canonical_episode_stream_id(series, season, number)
+        er, _ = M3UEpisodeRelation.objects.get_or_create(
+            m3u_account=account,
+            stream_id=stream_id,
+            defaults={
+                "episode": ep,
+                "series_relation": rel,
+                "container_extension": Path(p).suffix.lstrip(".") or "mp4",
+                "custom_properties": {MARKER: True},
+            },
+        )
+        er.episode = ep
+        er.series_relation = rel
+        er.container_extension = Path(p).suffix.lstrip(".") or "mp4"
+        ep_props = dict(er.custom_properties or {})
+        ep_props.update({
+            MARKER: True,
+            "decypharr_path": p,
+            "decypharr_api_url": api_media_url,
+            "decypharr_info_hash": item.get("info_hash"),
+            "decypharr_file_path": item.get("file_path"),
+            "fast_import": True,
+        })
+        er.custom_properties = ep_props
+        er.save()
+        seen_eps.add(er.id)
+
+        out_series = _safe(series.name + (" (%s)" % series.year if series.year else ""))
+        out_name = _safe(
+            "%s - S%02dE%02d - %s [Pending Metadata]" % (
+                out_series, int(season), int(number),
+                _episode_title(p) or "Episode %02d" % int(number),
+            )
+        )
+        out = os.path.join(lib, "shows", out_series, "Season %02d" % int(season), out_name + ".strm")
+        _make_strm(out, _play("episode", er.id, er.container_extension))
+        seen_files.add(os.path.realpath(out))
+        return True
+
+    release = _release_root(p, SOURCE_ROOT)
+    name = _release_title(release.name)
+    year = _year(str(release)) or _year(p)
+    if not name or _internal_stream_name(p):
+        return False
+    movie = _find_movie(name, year, None)
+    if movie is None:
+        movie = Movie.objects.create(name=name, year=year, custom_properties={MARKER: True, "fast_import": True})
+    mr, _ = M3UMovieRelation.objects.get_or_create(
+        m3u_account=account,
+        stream_id=_canonical_movie_stream_id(movie),
+        defaults={
+            "movie": movie,
+            "category": None,
+            "container_extension": Path(p).suffix.lstrip(".") or "mp4",
+            "custom_properties": {MARKER: True},
+        },
+    )
+    mr.movie = movie
+    mr.category = None
+    mr.container_extension = Path(p).suffix.lstrip(".") or "mp4"
+    props = dict(mr.custom_properties or {})
+    props.update({
+        MARKER: True,
+        "decypharr_path": p,
+        "decypharr_api_url": api_media_url,
+        "decypharr_info_hash": item.get("info_hash"),
+        "decypharr_file_path": item.get("file_path"),
+        "fast_import": True,
+    })
+    mr.custom_properties = props
+    mr.save()
+    seen_movies.add(mr.id)
+
+    movie_dir_name = _safe(name + (" (%s)" % year if year else ""))
+    out_name = _safe("%s [Pending Metadata]" % movie_dir_name)
+    out = os.path.join(lib, "movies", movie_dir_name, out_name + ".strm")
+    _make_strm(out, _play("movie", mr.id, mr.container_extension))
+    seen_files.add(os.path.realpath(out))
+    return True
+
+
 def _inventory_signature(media):
     rows = []
     for item in media:
@@ -2203,7 +2372,7 @@ def _start_auto_scan(plugin):
         AUTO_SCAN_THREAD.start()
 
 
-def _scan(plugin, force=False, background=False):
+def _scan(plugin, force=False, background=False, fast=False, enrich_only=False):
     if not SCAN_LOCK.acquire(blocking=False):
         return {"status": "busy"}
 
@@ -2223,6 +2392,8 @@ def _scan(plugin, force=False, background=False):
             "tmdb_key": settings.get("tmdb_api_key") or "",
             "metadata": settings.get("metadata_enabled", True),
             "ffprobe": settings.get("ffprobe_path") or "/usr/local/bin/ffprobe",
+            "fast_initial": settings.get("fast_initial_scan", True),
+            "metadata_batch_size": settings.get("metadata_batch_size", 25),
         }
         root = cfg["root"]
         lib = cfg["library"]
@@ -2253,12 +2424,97 @@ def _scan(plugin, force=False, background=False):
         media = _dedupe_discovered_media(media)
 
         inventory_signature = _inventory_signature(media)
+        metadata_state = _metadata_state_load()
+        first_inventory = _stored_inventory_signature() is None
+
         if background and not force and inventory_signature == _stored_inventory_signature():
+            if not (metadata_state.get("pending") or []):
+                return {
+                    "status": "unchanged",
+                    "message": "No Decypharr media changes detected; scan skipped.",
+                    "discovered": len(media),
+                }
+            enrich_only = True
+
+        fast = bool(fast or (first_inventory and cfg.get("fast_initial", True)))
+
+        if fast and not enrich_only:
+            LOG.info("Decypharr VOD: fast initial import started for %d objects", len(media))
+
+            season_groups = {}
+            for item in media:
+                if item.get("kind") == "season_file":
+                    season_groups.setdefault(
+                        str(item.get("info_hash") or item.get("release_name") or ""), []
+                    ).append(item)
+            for group in season_groups.values():
+                group.sort(key=lambda x: str(x.get("file_path") or x.get("file_name") or ""))
+                season = _release_season(group[0].get("release_name") or "")
+                if season is None:
+                    for item in group:
+                        item["kind"] = "movie"
+                else:
+                    for number, item in enumerate(group, 1):
+                        item["episode"] = (season, number)
+                        item["kind"] = "episode"
+                        item["season_pack"] = True
+
+            fast_seen_movies = set()
+            fast_seen_eps = set()
+            fast_seen_series = set()
+            fast_seen_series_relations = set()
+            fast_seen_files = set()
+            fast_counts = {"movies": 0, "episodes": 0, "skipped": 0}
+
+            for item in media:
+                try:
+                    ok = _fast_import_item(
+                        account, item, lib, fast_seen_files,
+                        fast_seen_movies, fast_seen_eps,
+                        fast_seen_series, fast_seen_series_relations,
+                    )
+                    if ok:
+                        fast_counts["episodes" if item.get("episode") else "movies"] += 1
+                    else:
+                        fast_counts["skipped"] += 1
+                except Exception:
+                    fast_counts["skipped"] += 1
+                    LOG.exception("Fast import failed for %s", item.get("path"))
+
+            _cleanup_library(lib, fast_seen_files)
+            M3UMovieRelation.objects.filter(m3u_account=account).exclude(id__in=fast_seen_movies).delete()
+            M3UEpisodeRelation.objects.filter(m3u_account=account).exclude(id__in=fast_seen_eps).delete()
+            M3USeriesRelation.objects.filter(m3u_account=account).exclude(id__in=fast_seen_series_relations).delete()
+
+            metadata_state = {
+                "inventory_signature": inventory_signature,
+                "pending": [_media_state_key(item) for item in media if item.get("api_url")],
+                "updated": time.time(),
+            }
+            _metadata_state_save(metadata_state)
+            _store_inventory_signature(inventory_signature)
+
             return {
-                "status": "unchanged",
-                "message": "No Decypharr media changes detected; scan skipped.",
+                "status": "ok",
+                "mode": "fast_initial",
+                "message": "Fast initial catalog is ready; metadata enrichment will continue in small background batches.",
+                "movies": fast_counts["movies"],
+                "episodes": fast_counts["episodes"],
+                "skipped": fast_counts["skipped"],
                 "discovered": len(media),
             }
+
+        if enrich_only:
+            pending = set(metadata_state.get("pending") or [])
+            if not pending:
+                return {"status": "unchanged", "message": "Metadata enrichment is complete."}
+            batch_size = max(1, int(cfg.get("metadata_batch_size", 25) or 25))
+            selected = []
+            for item in media:
+                if _media_state_key(item) in pending and len(selected) < batch_size:
+                    selected.append(item)
+            media = selected
+            LOG.info("Decypharr VOD: metadata enrichment batch %d", len(media))
 
         # Season packs often contain obfuscated child filenames. Assign
         # deterministic provisional episode numbers; embedded FFprobe
@@ -2612,6 +2868,10 @@ def _scan(plugin, force=False, background=False):
                     seen_eps.add(er.id)
 
                     counts["episodes"] += 1
+                    if enrich_only:
+                        pending = set(metadata_state.get("pending") or [])
+                        pending.discard(_media_state_key(item))
+                        metadata_state["pending"] = list(pending)
 
                 # ========================================================
                 # MOVIE
@@ -2786,6 +3046,10 @@ def _scan(plugin, force=False, background=False):
                     seen_movies.update(movie_relation_ids)
 
                     counts["movies"] += 1
+                    if enrich_only:
+                        pending = set(metadata_state.get("pending") or [])
+                        pending.discard(_media_state_key(item))
+                        metadata_state["pending"] = list(pending)
 
             except Exception:
                 counts["skipped"] += 1
@@ -2793,6 +3057,19 @@ def _scan(plugin, force=False, background=False):
                     "Failed processing %s",
                     p,
                 )
+
+        if enrich_only:
+            metadata_state["inventory_signature"] = inventory_signature
+            metadata_state["updated"] = time.time()
+            _metadata_state_save(metadata_state)
+            return {
+                "status": "ok",
+                "mode": "metadata_enrichment",
+                "movies": counts["movies"],
+                "episodes": counts["episodes"],
+                "skipped": counts["skipped"],
+                "remaining": len(metadata_state.get("pending") or []),
+            }
 
         # ================================================================
         # Normalize all Decypharr series as locally episode-fetched.
@@ -3525,6 +3802,10 @@ class Plugin:
         {"id": "metadata_enabled", "label": "TMDB Metadata", "type": "boolean", "default": True},
         {"id": "ffprobe_path", "label": "FFprobe Path", "type": "string", "default": "/usr/local/bin/ffprobe"},
         {"id": "scan_interval", "label": "Auto Scan Interval (seconds)", "type": "number", "default": 60},
+        {"id": "fast_initial_scan", "label": "Fast Initial Scan", "type": "boolean", "default": True,
+         "help_text": "First import builds the playable catalog without remote FFprobe/TMDB probing. Metadata, genres, artwork and technical details are enriched afterward in small background batches."},
+        {"id": "metadata_batch_size", "label": "Metadata Enrichment Batch Size", "type": "number", "default": 25,
+         "help_text": "Titles enriched per background pass. Lower values minimize impact on active VOD playback."},
         {"id": "transcode_info", "label": "About Browser Transcoding", "type": "info", "help_text": 'Browsers cannot play many common files: HEVC/x265, HDR10, and Dolby or DTS audio. In the Dispatcharr web player these start, stall, or freeze even though the stream is healthy. When enabled, the plugin checks each file the web player opens and converts only files the browser cannot play into H.264/AAC on the fly. Files a browser already plays, and every other app (VLC, Emby, Jellyfin, TiviMate, Kodi), are never transcoded. Seeking is limited while transcoding.'},
         {"id": "browser_transcode", "label": "Browser Transcoding", "type": "boolean", "default": False, "help_text": "Only used by the Dispatcharr web player, and only for files the browser cannot play. Off by default."},
         {"id": "transcode_encoder", "label": "Transcode Encoder", "type": "select", "default": "auto", "options": [
