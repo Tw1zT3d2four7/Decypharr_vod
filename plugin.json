@@ -131,6 +131,14 @@
       "button_label": "Test",
       "button_variant": "outlined",
       "button_color": "gray"
+    },
+    {
+      "id": "vod_database_cleanup",
+      "label": "Clean VOD Database",
+      "description": "Delete the VOD objects and relations, then immediately verify that the VOD tables are empty. The M3U accounts are preserved.",
+      "button_label": "Clean + Verify",
+      "button_variant": "outlined",
+      "button_color": "red"
     }
   ]
 }
