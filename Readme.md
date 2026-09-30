@@ -1,50 +1,43 @@
 # Decypharr VOD for Dispatcharr
 
-**Version:** 1.0.0
+**Version:** 1.0.0  
 **Author:** Tw1zT3d2four7
 
-Decypharr VOD is a Dispatcharr plugin that imports media managed by **Decypharr** into Dispatcharr as native VOD content.
+Decypharr VOD imports media managed by **Decypharr** into Dispatcharr as native VOD content.
 
-Instead of exposing the Decypharr filesystem directly to Dispatcharr, the plugin communicates with Decypharr through its authenticated API, creates a normalized local presentation library, and provides playback through an authenticated proxy route.
+The plugin uses Decypharr's authenticated API for discovery and playback, creates a normalized local `.strm` presentation library, and keeps the Decypharr API token server-side.
 
 ---
 
 ## What It Does
 
-Decypharr VOD provides:
+- Authenticated Decypharr API discovery
+- Movie and TV episode detection
+- Native Dispatcharr VOD movie, series, and episode objects
+- Normalized `.strm` presentation files
+- Decypharr API-backed playback with Range support
+- FFprobe technical metadata
+- Optional TMDB metadata
+- TMDB genre-based VOD categories, including multiple categories per title
+- Duplicate protection and stale-library cleanup
+- Real background automatic scanning
+- Progressive large-library importing
+- Active synthetic XC account with protected refresh
+- Repair and VOD database cleanup actions
+- Optional browser transcoding using NVIDIA, Intel QSV, AMD/VAAPI, or CPU
+- No Emby dependency
 
-* Authenticated Decypharr API discovery
-* Movie and TV episode detection
-* Native Dispatcharr VOD movie/series/episode objects
-* Normalized `.strm` presentation files
-* Decypharr API-backed playback
-* HTTP Range request support for playback
-* FFprobe technical metadata
-* Optional TMDB metadata
-* Automatic library cleanup
-* Duplicate protection
-* Reliable background automatic scanning
-* TMDB genre-based VOD categories
-* Active synthetic XC account with guarded refresh
-* Integration repair
-* Optional browser transcoding (NVIDIA, Intel, AMD, or CPU)
-* No Emby dependency
-
-The plugin is designed so Dispatcharr does **not** need direct access to the Decypharr storage implementation.
+The plugin does **not** require Dispatcharr to understand or directly access Decypharr's storage layout.
 
 ---
 
 # Architecture
 
-The media flow is:
-
 ```text
                     ┌──────────────────────┐
                     │      Decypharr       │
-                    │                      │
                     │  /api/browse/...     │
-                    │  /api/browse/        │
-                    │      download/...   │
+                    │  /api/browse/...     │
                     └──────────┬───────────┘
                                │
                          Authenticated API
@@ -52,10 +45,9 @@ The media flow is:
                                ▼
                     ┌──────────────────────┐
                     │    Decypharr VOD     │
-                    │      Plugin          │
-                    │                      │
-                    │  Discover / Parse    │
-                    │  Metadata / Normalize│
+                    │       Plugin         │
+                    │ Discover / Normalize │
+                    │ Metadata / Playback  │
                     └──────────┬───────────┘
                                │
                          .strm + metadata
@@ -71,14 +63,12 @@ The media flow is:
                                ▼
                     ┌──────────────────────┐
                     │ Decypharr API Proxy  │
-                    │  Authenticated Range │
+                    │ Authenticated Range  │
                     │       Streaming      │
                     └──────────────────────┘
 ```
 
-The `.strm` presentation does **not** contain the Decypharr API token.
-
-The plugin keeps authentication on the server side and adds the required authorization when it communicates with Decypharr.
+Generated `.strm` files do **not** contain the Decypharr API token. Authentication remains inside the plugin.
 
 ---
 
@@ -86,15 +76,15 @@ The plugin keeps authentication on the server side and adds the required authori
 
 ## Required
 
-* Dispatcharr
-* Decypharr
-* Decypharr API access
-* A Decypharr API token
-* FFprobe
+- Dispatcharr
+- Decypharr
+- Decypharr API access
+- Decypharr API token
+- FFprobe
 
 ## Optional
 
-* TMDB API key
+- TMDB API key
 
 TMDB metadata can be disabled if it is not required.
 
@@ -104,10 +94,10 @@ TMDB metadata can be disabled if it is not required.
 
 Install the plugin using the normal Dispatcharr plugin installation process.
 
-The plugin directory is:
+The installed plugin directory is:
 
 ```text
-data/plugins/decypharr_vod/
+/data/plugins/decypharr_vod/
 ```
 
 The primary plugin file is:
@@ -122,22 +112,24 @@ After installation, restart Dispatcharr if required by the plugin manager.
 
 # Configuration
 
-The plugin provides the following settings.
-
-| Setting | Description |
-| --- | --- |
-| Decypharr API URL | Base URL of the Decypharr API |
-| Decypharr API Token | Authentication token used for Decypharr API requests |
-| Normalized Library | Local directory used for generated `.strm` presentation files |
-| TMDB API Key | Optional TMDB API key |
-| TMDB Metadata | Enables/disables TMDB metadata |
-| FFprobe Path | Path to the FFprobe executable |
-| Auto Scan Interval | Automatic scan interval in seconds |
-| Browser Transcoding | Enables H.264/AAC transcoding for the Dispatcharr web player (off by default) |
-| Transcode Encoder | Auto-detect, NVIDIA, Intel (QSV), AMD/Intel (VAAPI), or CPU only |
-| VAAPI / QSV Device | Render device used by Intel QSV and VAAPI (default `/dev/dri/renderD128`) |
-| FFmpeg Path | Path to the FFmpeg executable (default `/usr/local/bin/ffmpeg`) |
-| Max Simultaneous Transcodes | Upper limit on concurrent browser transcodes (default 2) |
+| Setting | Default | Description |
+| --- | --- | --- |
+| Decypharr API URL | `http://192.168.1.11:8282` | Base URL of the Decypharr API |
+| Decypharr API Token | — | Authentication token for Decypharr API requests |
+| Normalized Library | `/data/plugins/decypharr_vod/library` | Local presentation directory for generated `.strm` files |
+| TMDB API Key | — | Optional TMDB API key |
+| TMDB Metadata | Enabled | Enables/disables TMDB metadata and genre categories |
+| FFprobe Path | `/usr/local/bin/ffprobe` | FFprobe executable |
+| Auto Scan Interval | 60 seconds | Interval used by the real background scanner |
+| Fast Initial Scan | Enabled | Creates the playable catalog before expensive metadata enrichment |
+| Metadata Enrichment Batch Size | 10 | Number of items processed per metadata batch |
+| Progressive Import Batch Size | 200 | Number of discovered media items imported per progressive batch |
+| Decypharr API Workers | 4 | Concurrent Decypharr API workers used during discovery |
+| Browser Transcoding | Disabled | Enables H.264/AAC browser transcoding when the browser cannot play the source |
+| Transcode Encoder | Auto-detect | NVIDIA, Intel QSV, AMD/VAAPI, or CPU |
+| VAAPI / QSV Device | `/dev/dri/renderD128` | Render device for Intel QSV/VAAPI |
+| FFmpeg Path | `/usr/local/bin/ffmpeg` | FFmpeg executable |
+| Max Simultaneous Transcodes | 2 | Maximum concurrent browser transcodes |
 
 Example:
 
@@ -149,7 +141,7 @@ Normalized Library:
 /data/plugins/decypharr_vod/library
 ```
 
-The exact paths will depend on the Dispatcharr container configuration.
+Paths depend on the Dispatcharr container configuration.
 
 ---
 
@@ -163,19 +155,15 @@ The primary inventory endpoint is:
 /api/browse/__all__
 ```
 
-Release directories are then queried using their Decypharr browse path.
+Release directories are then queried through their Decypharr browse paths.
 
-For playback, the plugin uses:
+For playback, the plugin uses the Decypharr download endpoint:
 
 ```text
 /api/browse/download/{torrent}/{file}
 ```
 
-The important distinction is that the Decypharr **browse path** is used to locate the release.
-
-The Decypharr torrent identifier is used by the **download endpoint**.
-
-The plugin does not assume that an `info_hash` is itself a valid browse path.
+The **browse path** identifies the release during discovery. The torrent identifier is used by the download endpoint. The plugin does not assume that an `info_hash` by itself is a valid browse path.
 
 ---
 
@@ -187,13 +175,9 @@ Decypharr API requests use:
 Authorization: Bearer <API_TOKEN>
 ```
 
-The API token is stored in the plugin configuration.
+The token is stored in plugin configuration and is never written into generated `.strm` files.
 
-The token is **never written into generated `.strm` files**.
-
-This is intentional.
-
-A generated `.strm` file represents the media location handled by the Dispatcharr plugin. Authentication remains inside the plugin's server-side API/proxy implementation.
+Authentication stays server-side so the generated library does not expose the Decypharr credential.
 
 ---
 
@@ -201,16 +185,14 @@ A generated `.strm` file represents the media location handled by the Dispatchar
 
 The plugin discovers video files from Decypharr's API inventory.
 
-Supported video formats are determined by the plugin's configured video-extension list.
+For each release it determines whether the content represents:
 
-For each Decypharr release, the plugin determines whether the content represents:
+- A movie
+- A TV episode
+- A multi-file release
+- A Blu-ray structure
 
-* A movie
-* A TV episode
-* A multi-file release
-* A Blu-ray structure
-
-The plugin then converts the discovered source into a normalized Dispatcharr representation.
+The discovered source is converted into the normalized Dispatcharr representation.
 
 ---
 
@@ -218,7 +200,7 @@ The plugin then converts the discovered source into a normalized Dispatcharr rep
 
 Movies are imported as native Dispatcharr VOD movies.
 
-The plugin creates a normalized structure similar to:
+Example normalized layout:
 
 ```text
 library/
@@ -227,7 +209,7 @@ library/
         └── Movie Name (Year) Quality.strm
 ```
 
-The `.strm` file points to the plugin's playback route rather than exposing the Decypharr API token.
+The `.strm` file uses the plugin playback route rather than exposing the Decypharr API token.
 
 ---
 
@@ -235,45 +217,27 @@ The `.strm` file points to the plugin's playback route rather than exposing the 
 
 TV content is imported as native Dispatcharr series and episode objects.
 
-Episodes are associated with their detected:
-
-```text
-Season
-Episode Number
-```
-
-The plugin also marks imported series as having locally fetched episode details so Dispatcharr does not attempt to retrieve the episodes through an unrelated synthetic provider.
+Episodes are associated with detected season and episode numbers. The plugin also records locally fetched episode details so Dispatcharr does not try to obtain them through an unrelated synthetic provider.
 
 ---
 
 # Blu-ray Handling
 
-The plugin supports Blu-ray-style releases containing M2TS streams.
+Blu-ray-style releases containing M2TS streams are treated as logical releases rather than treating every M2TS file as an independent movie.
 
-Blu-ray releases are treated as a logical media release rather than treating every `.m2ts` file as an independent movie.
+For TV Blu-ray releases, numbered usable streams can be mapped sequentially to episode numbers. Explicitly episode-labelled files are preserved when present.
 
-For TV Blu-ray releases, numbered usable streams can be mapped sequentially to episode numbers.
-
-The plugin also preserves explicitly episode-labelled files when present.
-
-Small menu, sample, and unusable streams are excluded from the primary media selection.
+Small menu, sample, and unusable streams are excluded from primary media selection.
 
 ---
 
 # Duplicate Handling
 
-The plugin performs logical deduplication before updating Dispatcharr.
+Logical deduplication is performed before Dispatcharr is updated.
 
 When multiple physical source files resolve to the same logical movie or episode, the plugin selects the largest usable source.
 
-This prevents:
-
-* Duplicate Dispatcharr relations
-* Duplicate streams
-* Scan-order-dependent source selection
-* Multiple representations of the same logical episode
-
-Canonical stream identities are used for movies and episodes so repeated scans do not continuously create duplicates.
+Canonical stream identities prevent repeated scans from continuously creating duplicate relations.
 
 ---
 
@@ -281,23 +245,17 @@ Canonical stream identities are used for movies and episodes so repeated scans d
 
 ## FFprobe
 
-FFprobe is used to obtain technical media information such as:
+FFprobe can provide technical information including:
 
-* Video codec
-* Audio codec
-* Resolution
-* Frame rate
-* Bitrate
-* Container information
-* Audio channels
+- Video codec
+- Audio codec
+- Resolution
+- Frame rate
+- Bitrate
+- Container information
+- Audio channels
 
-FFprobe can operate against the Decypharr API-backed media source using authenticated requests.
-
-Configure the FFprobe executable using:
-
-```text
-FFprobe Path
-```
+Configure the executable with **FFprobe Path**.
 
 Default:
 
@@ -305,27 +263,47 @@ Default:
 /usr/local/bin/ffprobe
 ```
 
----
-
 ## TMDB
 
 TMDB metadata is optional.
 
-When enabled, the plugin can use the configured TMDB API key to obtain metadata for imported movies and series.
+When enabled, the plugin can obtain metadata for imported movies and series using the configured TMDB API key.
 
-TMDB support can be disabled using:
+Set **TMDB Metadata** to disabled to turn TMDB enrichment off.
+
+---
+
+# TMDB Genre Categories
+
+v1.0.0 uses TMDB genres as native Dispatcharr VOD categories when TMDB metadata is enabled.
+
+For every genre returned for a movie or series:
+
+1. The plugin looks for an existing Dispatcharr VOD category with that genre name.
+2. If it does not exist, the category is created automatically.
+3. The movie or series is related to that category.
+4. Existing categories and relations are reused on later scans.
+
+A title with multiple TMDB genres can therefore belong to multiple Dispatcharr categories.
+
+Example:
 
 ```text
-TMDB Metadata
+Movie
+├── Action
+├── Adventure
+└── Science Fiction
 ```
+
+No duplicate category is created simply because another title uses the same genre.
+
+The old generic Decypharr Movies and Decypharr TV category approach is not used for v1.0.0 genre classification.
 
 ---
 
 # Normalized Library
 
-The normalized library is a presentation layer for Dispatcharr.
-
-It does **not** replace Decypharr's storage.
+The normalized library is a presentation layer for Dispatcharr. It does **not** replace Decypharr's storage.
 
 For example:
 
@@ -335,15 +313,11 @@ For example:
 
 may contain generated `.strm` files while the actual media remains managed by Decypharr.
 
-This separation allows Dispatcharr to work with a predictable local library representation without requiring Dispatcharr to understand Decypharr's underlying storage layout.
-
 ---
 
 # Playback
 
-Playback is handled through the plugin's local integration route.
-
-The playback path is conceptually:
+Playback is handled through the plugin's local integration route:
 
 ```text
 Dispatcharr .strm
@@ -357,59 +331,147 @@ Authenticated Decypharr API request
 Media stream
 ```
 
-The proxy supports HTTP Range requests and forwards relevant content headers so clients can perform normal media seeking and streaming.
+The proxy supports HTTP Range requests and forwards relevant content headers so clients can seek and stream normally.
+
+---
+
+# Synthetic XC Account
+
+The plugin maintains a synthetic XC account because Dispatcharr's native VOD relation and proxy layer requires a usable XC account.
+
+The account remains **active**. It is not a real upstream IPTV provider and is not disabled after import.
+
+The plugin protects this account from normal provider refresh behavior:
+
+- The account remains usable for VOD relations and `.strm` playback.
+- A user-initiated Refresh on the synthetic account is intercepted.
+- The guarded refresh returns a successful no-op instead of attempting to contact a placeholder server such as `127.0.0.1:80`.
+- The plugin's Scan Now and automatic scanner remain responsible for the Decypharr VOD inventory.
+- The refresh guard is installed during plugin load and Repair and is idempotent, so repeated plugin loads do not stack duplicate patches.
+
+---
+
+# Scanning
+
+The plugin provides:
+
+```text
+Scan Now
+```
+
+A normal scan:
+
+1. Connects to Decypharr.
+2. Retrieves the current inventory.
+3. Resolves release paths and contents.
+4. Identifies movies and episodes.
+5. Deduplicates logical media.
+6. Generates or updates normalized `.strm` files.
+7. Updates Dispatcharr VOD objects and relations.
+8. Updates metadata when required.
+9. Removes stale normalized files.
+10. Removes stale plugin-owned relations/objects where appropriate.
+
+A scan does **not** delete the underlying Decypharr media.
+
+## Fast Initial Scan
+
+**Fast Initial Scan** is enabled by default.
+
+The initial import is designed for large libraries. Discovery emits completed media batches progressively instead of waiting for the entire inventory to finish before importing anything.
+
+The fast pass prioritizes creation of the playable VOD catalog and avoids waiting for FFprobe/TMDB enrichment before the catalog can be populated.
+
+## Progressive Import
+
+**Progressive Import Batch Size** controls how many discovered items are handed to the fast importer at a time.
+
+With the default of 200, newly discovered batches can become visible in the VOD collection while the remaining Decypharr inventory is still being discovered.
+
+## Metadata Enrichment
+
+Metadata enrichment is separated from the initial fast import.
+
+**Metadata Enrichment Batch Size** controls how many pending items are processed in one enrichment batch. This limits FFprobe/TMDB activity so a large library does not require one huge metadata operation.
+
+## API Workers
+
+**Decypharr API Workers** controls the concurrent API workers used during Decypharr discovery.
+
+The default is 4.
+
+## Scan Lock
+
+Only one scan may run at a time. The scan lock prevents overlapping scans from modifying the same Dispatcharr objects simultaneously.
+
+---
+
+# Automatic Scanning
+
+**Auto Scan Interval** is backed by a real background worker inside Dispatcharr.
+
+The worker checks the Decypharr inventory at the configured interval.
+
+The scanner tracks the inventory so changes can be detected without requiring the user to press **Scan Now**. New or changed media is sent through the plugin's import/update pipeline, while removed media is handled by the stale-library cleanup logic.
+
+This means newly added Decypharr media can enter the Dispatcharr VOD collection automatically while the plugin is running.
+
+**Scan Now** remains available when an immediate scan is wanted.
+
+Automatic scanning is not the same thing as Dispatcharr's provider refresh. The synthetic XC account is deliberately protected from normal XC refresh behavior.
+
+---
+
+# Series Next-Episode Metadata
+
+v1.0.0 records deterministic next-episode metadata for imported series episodes.
+
+The metadata includes the next episode identity and season/episode information. The next episode is linked only when it belongs to the **same season**.
+
+The final episode of a season is explicitly marked as the season boundary, so the backend does not automatically cross from one season into the next.
+
+This provides the backend information needed for a future/native player workflow such as:
+
+```text
+Episode ends
+   ↓
+Next episode exists in same season?
+   ├── Yes → player may offer/continue to next episode
+   └── No  → stop at season boundary
+```
+
+The plugin currently stores the backend next-episode metadata; it does **not** replace Dispatcharr's React/frontend player bundle or claim to implement the player's automatic-next-episode UI by itself.
 
 ---
 
 # Browser Transcoding
 
-Dispatcharr's web player is a browser `<video>` element. Browsers cannot reliably
-play HEVC, HDR10, Dolby audio, or MKV remuxes, so those titles may start and stop
-within seconds in the web player even though the stream itself is healthy.
+Dispatcharr's web player cannot reliably play every HEVC, HDR, Dolby-audio, MPEG-TS, AVI, or MKV combination.
 
-When **Browser Transcoding** is enabled, the plugin checks each Decypharr file the
-Dispatcharr web player opens and transcodes it to **H.264 / AAC** live **only if the
-browser cannot play it as-is**. HDR10 sources are tone-mapped to SDR. Every other
-client, including VLC, Emby, Jellyfin, Kodi, and TiviMate, is served the original file
-untouched.
+When **Browser Transcoding** is enabled, the plugin can transcode incompatible browser playback to H.264/AAC. HDR sources can be tone-mapped to SDR.
 
-The feature is **off by default**. When it is off, nothing changes.
+The feature is **off by default**.
 
-## When it activates
+Other clients continue to receive the original media through the normal playback route.
 
-Even with the setting enabled, a file is transcoded only when the web player asks for
-it and the file is one of these:
+## Encoder Selection
 
-* Video other than H.264 (8-bit), VP8, VP9, or AV1, for example HEVC/x265
-* HDR10 or HLG video, or 10-bit / non-4:2:0 H.264
-* Audio other than AAC, MP3, Opus, Vorbis, or FLAC, for example AC-3, E-AC-3, DTS, TrueHD
-* A container the browser cannot open, such as MPEG-TS or AVI
-* An MKV file in a browser other than Chrome, Edge, or another Chromium browser
+With **Transcode Encoder** set to Auto-detect, the plugin tests available encoders and selects a working hardware path when possible, with CPU fallback.
 
-H.264/AAC files in MP4, and H.264/AAC MKV files in Chromium browsers, play directly
-with no transcoding. The result of the check is cached for ten minutes per title.
+Supported paths include:
 
-## How the encoder is chosen
+- NVIDIA NVENC
+- Intel Quick Sync (QSV)
+- AMD/Intel VAAPI
+- CPU/libx264
 
-With **Transcode Encoder** set to *Auto-detect*, the plugin runs a one-second test
-encode with each encoder and uses the first one that works:
+Use **Test Transcoding** to check the available encoder path in the running Dispatcharr container.
 
-1. NVIDIA (NVENC)
-2. Intel Quick Sync (QSV)
-3. AMD / Intel (VAAPI)
-4. CPU (libx264)
+## Docker GPU Access
 
-A listed encoder is not enough; the test proves the container can actually use the
-GPU. You can also pick a specific encoder. If the chosen encoder does not work, the
-plugin logs the reason and falls back to the CPU. Use the **Test Transcoding**
-action to see the result for each encoder on your system.
+The plugin cannot grant GPU access to a container. GPU/device access must be configured in Docker Compose.
 
-## GPU access in Docker
-
-The plugin cannot give a container access to a GPU. Add it to the Dispatcharr
-container in your compose file.
-
-NVIDIA (requires the NVIDIA Container Toolkit):
+NVIDIA example:
 
 ```yaml
 services:
@@ -423,7 +485,7 @@ services:
               capabilities: [gpu, video, compute, utility]
 ```
 
-Intel or AMD:
+Intel/AMD example:
 
 ```yaml
 services:
@@ -432,109 +494,55 @@ services:
       - /dev/dri:/dev/dri
 ```
 
-Depending on your host, the container user may also need the `video` or `render`
-group (`group_add`). AMD GPUs use the VAAPI option.
-
-## Behavior and limits
-
-* Playback starts from the beginning. Seeking is limited to what the browser has
-  already buffered, and duration may not be shown.
-* Audio is downmixed to stereo AAC. Subtitles are not included.
-* Sources larger than 1080p are scaled down to 1080p.
-* **Max Simultaneous Transcodes** protects the server. Extra browser requests
-  receive a "capacity reached" response until one finishes. GPU encoders may also
-  have their own session limits.
-* Browsers open several connections for one file (an initial burst, and again on
-  seek). The newest request for a title from a client replaces that client's older
-  transcode, so they never stack up.
-* If anything in the transcode path fails, playback falls back to the original
-  file.
-* The Decypharr API token is never placed on a command line. The transcoder reads
-  the media through Dispatcharr's own VOD endpoint.
-
-## Testing status
-
-The NVIDIA encode path was benchmarked with FFmpeg on an NVIDIA GTX 960, and the
-CPU path and routing logic were tested with real FFmpeg. The Intel QSV and AMD
-VAAPI command lines follow standard FFmpeg usage but have not been tested on
-hardware. If they fail on your system, the plugin falls back to the CPU.
-Reports are welcome.
+The container user may also need the appropriate `video`/ `render` group.
 
 ---
 
-# Scanning
+# Repair
 
-The plugin provides a:
+The **Repair** action reinstalls the plugin's integration hooks and playback route and ensures the synthetic Decypharr account exists.
 
-```text
-Scan Now
-```
+Use Repair if the Dispatcharr integration has been disrupted without rebuilding the plugin configuration.
 
-action.
-
-A scan:
-
-1. Connects to Decypharr
-2. Retrieves the current media inventory
-3. Resolves release paths
-4. Retrieves release contents
-5. Identifies movies and episodes
-6. Deduplicates logical media
-7. Generates/updates normalized `.strm` files
-8. Updates Dispatcharr VOD relations
-9. Updates technical metadata
-10. Optionally updates TMDB metadata
-11. Removes stale normalized files
-12. Removes stale plugin-owned relations
-13. Removes orphaned plugin-owned objects
-
-A scan does not delete the underlying Decypharr media.
+Repair also reinstalls the synthetic XC refresh guard.
 
 ---
 
-# Automatic Scanning
+# Clean + Verify VOD Database
 
-The plugin supports automatic scanning through:
+The **Clean VOD Database** action is a destructive maintenance operation intended for rebuilding the Dispatcharr VOD database before a clean import.
 
-```text
-Auto Scan Interval (seconds)
-```
-
-The default interval is:
+It removes plugin/VOD records from these VOD tables:
 
 ```text
-60
+vod_m3uepisoderelation
+vod_m3umovierelation
+vod_m3useriesrelation
+vod_m3uvodcategoryrelation
+vod_episode
+vod_movie
+vod_series
+vod_vodcategory
+vod_vodlogo
 ```
 
-Only one scan is allowed to run at a time.
+M3U account records are preserved.
 
-This prevents overlapping scans from modifying the same Dispatcharr objects simultaneously.
+After deletion, the action verifies the VOD object/relation counts.
+
+**This action should only be used when you intentionally want to rebuild the Dispatcharr VOD database. It does not delete the underlying Decypharr media.**
 
 ---
 
-# Repair Integration
-
-The plugin provides:
-
-```text
-Repair
-```
-
-The repair action reinstalls the plugin's integration hooks and playback route and ensures the synthetic Decypharr account exists.
-
-Use this if the Dispatcharr integration has been disrupted without needing to rebuild the plugin configuration.
-
----
-
-# Safety and Data Ownership
+# Data Ownership and Cleanup
 
 Decypharr remains the source of truth for the actual media.
 
 The plugin owns its normalized Dispatcharr representation.
 
-The plugin's cleanup operations are limited to plugin-owned normalized files, relations, and objects.
+Normal scan cleanup is limited to plugin-owned normalized files, relations, and objects. It does **not** delete the underlying Decypharr media.
 
-It does **not** delete the underlying Decypharr media when performing a normal scan.
+The **Clean + Verify VOD Database** action is separate and explicitly destructive to Dispatcharr's VOD database records.
 
 ---
 
@@ -542,13 +550,9 @@ It does **not** delete the underlying Decypharr media when performing a normal s
 
 ## "Decypharr Root not found"
 
-Older versions of the plugin relied on direct filesystem scanning.
+Current versions use the Decypharr API rather than direct filesystem scanning.
 
-Current versions use the Decypharr API.
-
-If the plugin reports a filesystem-root error, verify that the installed plugin version is current and that the API-based version of the plugin is actually loaded.
-
----
+Verify that the installed plugin version is current and that the API-based plugin is actually loaded.
 
 ## No media discovered
 
@@ -561,172 +565,69 @@ Verify:
 5. Releases contain supported video files.
 6. The plugin scan completes without errors.
 
----
-
 ## Playback fails
 
 Verify:
 
 1. Decypharr API access works.
 2. The API token is configured.
-3. The generated `.strm` file does not contain an invalid/stale URL.
+3. The generated `.strm` entry is valid.
 4. The Decypharr download endpoint is reachable from Dispatcharr.
-5. The media file is available in Decypharr.
-6. HTTP Range requests are being handled correctly.
-
----
+5. The media is available in Decypharr.
+6. HTTP Range requests are working.
 
 ## Duplicate movies or episodes
 
-Run:
+Use **Repair**, then run **Scan Now**.
 
-```text
-Repair
-```
+If you intentionally want a complete Dispatcharr VOD rebuild, use **Clean + Verify VOD Database**, then run a clean scan.
 
-followed by:
+## Synthetic XC Refresh reports a connection error
 
-```text
-Scan Now
-```
+Run **Repair** first.
 
-The plugin uses canonical logical identities and deduplication to prevent repeated relations.
+The synthetic account is supposed to remain active, but its normal XC refresh is guarded so it does not attempt to connect to a fake upstream server.
+
+## Browser playback fails
+
+If the source is HEVC/HDR/DTS/TrueHD/MKV or another format the browser cannot play, enable **Browser Transcoding** and run **Test Transcoding**.
 
 ---
 
+# v1.0.0 Changes
 
+### TMDB Genre Categories
 
-# Version 1.0.0 Changes
+TMDB genres are converted into Dispatcharr VOD categories. Categories are created on first encounter and reused. A movie or series can have multiple genre-category relations.
 
-## TMDB Genre Categories
+### Active Synthetic XC Account
 
-When TMDB metadata is enabled, every genre returned for a movie or series is converted
-into a Dispatcharr VOD category. Categories are created automatically when first
-encountered and reused on later scans.
+The synthetic XC account remains active for Dispatcharr VOD relations and playback. Refresh is guarded as a successful no-op instead of contacting a placeholder upstream.
 
-A movie or series with multiple TMDB genres is linked to each matching category without
-creating duplicate Movie or Series objects. The old generic Decypharr Movies and
-Decypharr TV categories are no longer used by v1.0.0.
+### Real Automatic Scanning
 
-## Synthetic XC Account
+Auto Scan Interval now controls a real background worker. Inventory changes can be detected and imported without requiring a manual Scan Now.
 
-The synthetic XC account remains **active** because Dispatcharr's native VOD relation
-and proxy layer requires a usable XC account. It is still not a real upstream provider.
+### Progressive Large-Library Import
 
-v1.0.0 installs guards around Dispatcharr's normal XC refresh tasks. A user Refresh on
-this synthetic account is intercepted and returns a successful no-op instead of trying
-to contact the placeholder local server. The plugin's Scan Now and background scanner
-remain responsible for the VOD inventory.
+Large libraries can be imported progressively. The playable catalog is prioritized before slower metadata enrichment, with configurable batch sizes and API worker concurrency.
 
-## Reliable Automatic Scanning
+### VOD Database Maintenance
 
-The Auto Scan Interval is backed by a real background worker inside Dispatcharr.
+A **Clean + Verify VOD Database** action is available for intentional Dispatcharr VOD database rebuilds.
 
-The worker checks the Decypharr API inventory at the configured interval and calculates
-a stable inventory signature. If nothing changed, the import pipeline is skipped. When
-media is added, removed, or changed, the same processing pipeline used by Scan Now runs
-automatically.
+### Series Metadata
 
-Only one scan may run at a time, including across separate Dispatcharr workers.
-**Scan Now** remains available and forces an immediate scan.
-
-This means newly added Decypharr media no longer requires a manual Scan Now to enter the
-Dispatcharr VOD collection, provided the background worker is running.
-
-# Version 1.0.0
-
-Version 1.0.0 is the current release line.
-
-Key characteristics:
-
-* API-based media discovery
-* Decypharr authentication
-* Browse-by-path release resolution
-* API-backed playback
-* Server-side authentication
-* Token-free `.strm` presentation
-* Native Dispatcharr VOD integration
-* Movie and TV support
-* Blu-ray/M2TS handling
-* Logical deduplication
-* FFprobe metadata
-* Optional TMDB metadata
-* Normalized library cleanup
-* Scan locking
-* Repair action
-* Optional browser transcoding with hardware auto-detection
+Next-episode metadata is recorded within each season. The final episode is marked as the season boundary.
 
 ---
 
 # Design Philosophy
 
-Decypharr owns the media.
+**Decypharr owns the media.**
 
-Dispatcharr owns the VOD presentation.
+**Dispatcharr owns the VOD presentation.**
 
-Decypharr VOD connects the two through a normalized, API-backed presentation layer.
+Decypharr VOD connects the two through a normalized, authenticated API-backed presentation layer.
 
-
-Version 1.0.0 is the current release line.
-
-Key characteristics:
-
-* API-based media discovery
-* Decypharr authentication
-* Browse-by-path release resolution
-* API-backed playback
-* Server-side authentication
-* Token-free `.strm` presentation
-* Native Dispatcharr VOD integration
-* Movie and TV support
-* Blu-ray/M2TS handling
-* Logical deduplication
-* FFprobe metadata
-* Optional TMDB metadata
-* Normalized library cleanup
-* Scan locking
-* Repair action
-* Optional browser transcoding with hardware auto-detection
-
----
-
-# Design Philosophy
-
-Decypharr owns the media.
-
-Dispatcharr owns the VOD presentation.
-
-Decypharr VOD connects the two through a normalized, API-backed presentation layer.
-
-
-## Large-Library Initial Scan
-
-v1.0.0 is designed for large Usenet-style libraries.
-
-The initial import uses a **progressive fast pass**. Decypharr inventory discovery is emitted
-to the importer in bounded batches instead of waiting for the entire library to finish
-before importing anything.
-
-The fast pass avoids FFprobe and TMDB requests. It creates the playable VOD catalog first.
-Metadata enrichment then runs separately in small batches.
-
-Settings:
-
-* **Fast Initial Scan** — enabled by default
-* **Progressive Import Batch Size** — 200 by default
-* **Metadata Enrichment Batch Size** — 10 by default
-* **Decypharr API Workers** — 4 by default
-* **Auto Scan Interval** — continues to control background change detection
-
-The intent is to keep database, Decypharr API, FFprobe, and TMDB activity from monopolizing
-resources while a user is watching VOD.
-
-## Series Playback Metadata
-
-v1.0.0 records deterministic next-episode metadata on each Decypharr episode relation.
-The next episode is linked only within the same season; the final episode of a season is
-explicitly marked as the season boundary.
-
-This backend metadata is intentionally separate from Dispatcharr's player UI. Native
-automatic playback requires the Dispatcharr frontend video player to consume the next
-episode field; the plugin does not replace Dispatcharr's frontend bundle.
+The plugin is designed to keep credentials server-side, avoid unnecessary duplicate provider work, and make large Decypharr libraries usable as native Dispatcharr VOD content.
