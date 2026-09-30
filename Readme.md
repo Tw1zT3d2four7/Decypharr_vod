@@ -667,7 +667,7 @@ Dispatcharr owns the VOD presentation.
 Decypharr VOD connects the two through a normalized, API-backed presentation layer.
 
 
-Version 0.5.2 is the current release line.
+Version 1.0.0 is the current release line.
 
 Key characteristics:
 
