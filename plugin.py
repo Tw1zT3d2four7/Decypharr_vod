@@ -3915,6 +3915,82 @@ def _patch_transcode():
     return _TX_PATCHED
 
 
+def _cleanup_vod_database():
+    """
+    Destructive VOD reset for the plugin Actions tab.
+
+    Deletes the same VOD tables used by the documented manual cleanup
+    command, then immediately verifies the resulting row counts.
+    M3UAccount rows are intentionally preserved so the synthetic
+    Decypharr VOD account remains available for the plugin to recreate/use.
+    """
+    tables = [
+        "vod_m3uepisoderelation",
+        "vod_m3umovierelation",
+        "vod_m3useriesrelation",
+        "vod_m3uvodcategoryrelation",
+        "vod_episode",
+        "vod_movie",
+        "vod_series",
+        "vod_vodcategory",
+        "vod_vodlogo",
+    ]
+
+    deleted = {}
+    try:
+        with transaction.atomic():
+            with connection.cursor() as cursor:
+                for table in tables:
+                    cursor.execute("DELETE FROM %s" % table)
+                    deleted[table] = cursor.rowcount
+
+        counts = {
+            "Movies": Movie.objects.count(),
+            "Series": Series.objects.count(),
+            "Episodes": Episode.objects.count(),
+            "Movie relations": M3UMovieRelation.objects.count(),
+            "Series relations": M3USeriesRelation.objects.count(),
+            "Episode relations": M3UEpisodeRelation.objects.count(),
+            "Category relations": M3UVODCategoryRelation.objects.count(),
+            "Categories": VODCategory.objects.count(),
+            "Logos": VODLogo.objects.count(),
+            "M3U accounts": M3UAccount.objects.count(),
+        }
+
+        verified_empty = all(
+            counts[name] == 0
+            for name in (
+                "Movies",
+                "Series",
+                "Episodes",
+                "Movie relations",
+                "Series relations",
+                "Episode relations",
+                "Category relations",
+                "Categories",
+                "Logos",
+            )
+        )
+
+        return {
+            "status": "ok" if verified_empty else "error",
+            "message": (
+                "VOD DATABASE CLEANUP COMPLETE"
+                if verified_empty
+                else "VOD DATABASE CLEANUP FINISHED BUT VERIFICATION FOUND REMAINING VOD ROWS"
+            ),
+            "deleted": deleted,
+            "verification": counts,
+        }
+    except Exception as exc:
+        LOG.exception("Decypharr VOD: VOD database cleanup failed")
+        return {
+            "status": "error",
+            "message": "VOD database cleanup failed: %s" % exc,
+            "deleted": deleted,
+        }
+
+
 def _tx_test(cfg):
     """Human-readable encoder test report for the 'Test Transcoding' action."""
     ffmpeg = _tx_find_ffmpeg(cfg)
@@ -3974,6 +4050,7 @@ class Plugin:
         {"id": "scan", "label": "Scan Decypharr", "description": "Scan Decypharr and rebuild the normalized presentation library.", "button_label": "Scan Now", "button_variant": "filled", "button_color": "blue"},
         {"id": "repair", "label": "Repair Integration", "description": "Reinstall native VOD hooks and ensure the synthetic account exists.", "button_label": "Repair", "button_variant": "outlined", "button_color": "gray"},
         {"id": "transcode_test", "label": "Test Transcoding", "description": "Test which hardware encoders (NVIDIA, Intel, AMD/VAAPI) or the CPU can transcode on this system.", "button_label": "Test", "button_variant": "outlined", "button_color": "gray"},
+        {"id": "vod_database_cleanup", "label": "Clean VOD Database", "description": "Delete the VOD objects and relations, then immediately verify that the VOD tables are empty. The M3U accounts are preserved.", "button_label": "Clean + Verify", "button_variant": "outlined", "button_color": "red"},
     ]
 
     def __init__(self):
@@ -4004,6 +4081,8 @@ class Plugin:
             return {"status": "ok", "message": "Decypharr VOD integration repaired.", "route_installed": ROUTE_INSTALLED, "patched": PATCHED, "transcode_hook": _TX_PATCHED}
         if action == "transcode_test":
             return _tx_test(_tx_settings(force=True))
+        if action == "vod_database_cleanup":
+            return _cleanup_vod_database()
         if action == "scan":
             return _scan(self, force=True, background=False)
         return {"status": "error", "message": "Unknown action: %s" % action}
