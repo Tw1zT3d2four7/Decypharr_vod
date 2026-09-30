@@ -42,7 +42,7 @@ DEFAULT_API_URL = "http://192.168.1.11:8282"
 STATE_DIR = "/data/plugins/decypharr_vod"
 API_CACHE_FILE = os.path.join(STATE_DIR, "api_inventory.json")
 API_PAGE_SIZE = 50
-API_WORKERS = 12
+API_WORKERS = 4
 API_TOKEN = ""
 API_BASE_URL = DEFAULT_API_URL
 CACHE_DIR = os.path.join(STATE_DIR, "metadata")
@@ -1758,7 +1758,7 @@ def _discover_media(root, api_url=None, api_token=None):
             cached_meta[h] = sig
 
     if missing:
-        with ThreadPoolExecutor(max_workers=API_WORKERS) as pool:
+        with ThreadPoolExecutor(max_workers=max(1, min(8, int((settings or {}).get("api_workers", API_WORKERS) or API_WORKERS)))) as pool:
             futures = [pool.submit(fetch, release) for release in missing]
             for future in as_completed(futures):
                 h, files = future.result()
@@ -2393,7 +2393,8 @@ def _scan(plugin, force=False, background=False, fast=False, enrich_only=False):
             "metadata": settings.get("metadata_enabled", True),
             "ffprobe": settings.get("ffprobe_path") or "/usr/local/bin/ffprobe",
             "fast_initial": settings.get("fast_initial_scan", True),
-            "metadata_batch_size": settings.get("metadata_batch_size", 25),
+            "metadata_batch_size": settings.get("metadata_batch_size", 10),
+            "api_workers": settings.get("api_workers", API_WORKERS),
         }
         root = cfg["root"]
         lib = cfg["library"]
@@ -3804,8 +3805,10 @@ class Plugin:
         {"id": "scan_interval", "label": "Auto Scan Interval (seconds)", "type": "number", "default": 60},
         {"id": "fast_initial_scan", "label": "Fast Initial Scan", "type": "boolean", "default": True,
          "help_text": "First import builds the playable catalog without remote FFprobe/TMDB probing. Metadata, genres, artwork and technical details are enriched afterward in small background batches."},
-        {"id": "metadata_batch_size", "label": "Metadata Enrichment Batch Size", "type": "number", "default": 25,
+        {"id": "metadata_batch_size", "label": "Metadata Enrichment Batch Size", "type": "number", "default": 10,
          "help_text": "Titles enriched per background pass. Lower values minimize impact on active VOD playback."},
+        {"id": "api_workers", "label": "Decypharr API Workers", "type": "number", "default": 4,
+         "help_text": "Parallel Decypharr inventory requests. Lower values reduce network pressure on active playback; 4 is the default for large libraries."},
         {"id": "transcode_info", "label": "About Browser Transcoding", "type": "info", "help_text": 'Browsers cannot play many common files: HEVC/x265, HDR10, and Dolby or DTS audio. In the Dispatcharr web player these start, stall, or freeze even though the stream is healthy. When enabled, the plugin checks each file the web player opens and converts only files the browser cannot play into H.264/AAC on the fly. Files a browser already plays, and every other app (VLC, Emby, Jellyfin, TiviMate, Kodi), are never transcoded. Seeking is limited while transcoding.'},
         {"id": "browser_transcode", "label": "Browser Transcoding", "type": "boolean", "default": False, "help_text": "Only used by the Dispatcharr web player, and only for files the browser cannot play. Off by default."},
         {"id": "transcode_encoder", "label": "Transcode Encoder", "type": "select", "default": "auto", "options": [
