@@ -24,6 +24,7 @@ The plugin uses Decypharr's authenticated API for discovery and playback, create
 - Normalized `.strm` presentation files
 - Decypharr API-backed playback with HTTP Range support
 - FFprobe technical metadata
+- Configurable preferred audio language with source-default fallback
 - Optional TMDB metadata, artwork and genre matching
 - TMDB genre-based Dispatcharr VOD categories
 - Multiple TMDB categories per movie or series
@@ -132,6 +133,7 @@ After installation, restart Dispatcharr if required by the plugin manager.
 | TMDB API Key | — | Optional TMDB API key |
 | TMDB Metadata | Enabled | Enables TMDB metadata and genre categories |
 | FFprobe Path | `/usr/local/bin/ffprobe` | FFprobe executable |
+| Preferred Audio Language | eng (English) | Preferred audio track when multiple tracks exist; falls back to source default, then first available |
 | Auto Scan Interval | 60 seconds | Background inventory scan interval |
 | Fast Initial Scan | Enabled | Prioritizes a playable catalog before expensive enrichment |
 | Metadata Enrichment Batch Size | 10 | Items enriched per background batch |
@@ -156,6 +158,21 @@ Normalized Library:
 Paths depend on the Dispatcharr container configuration.
 
 ---
+
+
+# Preferred Audio Language
+
+**Preferred Audio Language** controls which audio track is selected when a title contains multiple audio streams. The public default is **English (eng)**.
+
+Selection order is:
+
+1. The configured language, when present.
+2. The source's existing default audio track, when the configured language is unavailable.
+3. The first available audio track.
+
+The plugin retains the complete FFprobe audio-track list and records the selected stream in VOD metadata. Direct-play sources are **not** remuxed solely to change their audio default. When browser transcoding is actually required, the selected preferred audio stream is used for the H.264/AAC transcode and marked as the default output audio track.
+
+The setting is configurable for public-plugin users and supports English, Spanish, French, German, Italian, Portuguese, Japanese, Korean, Chinese, Hindi, Arabic, or **Source Default / First Available**.
 
 # Decypharr API Discovery
 
