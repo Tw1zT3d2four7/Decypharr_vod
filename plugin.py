@@ -564,7 +564,7 @@ def _ffprobe(path, exe):
                 audios.append(x)
             elif st.get("codec_type") == "subtitle":
                 subs.append(x)
-        return {"duration": float((raw.get("format") or {}).get("duration") or 0), "bitrate": int((raw.get("format") or {}).get("bit_rate") or 0), "format": (raw.get("format") or {}).get("format_name"), "video": videos, "audio": audios, "subtitles": subs}
+        return {"duration": float((raw.get("format") or {}).get("duration") or 0), "bitrate": int((raw.get("format") or {}).get("bit_rate") or 0), "format": (raw.get("format") or {}).get("format_name"), "title": ((raw.get("format") or {}).get("tags") or {}).get("title") or "", "video": videos, "audio": audios, "subtitles": subs}
     except Exception as e:
         return {"error": str(e)}
 
@@ -1479,7 +1479,21 @@ def _discover_media(root, api_url=None, api_token=None):
             safe_release = _safe(release_name) or h
             virtual = os.path.join(virtual_root, safe_release, os.path.basename(name))
             epi = _episode(name)
-            discovered.append({"kind": "episode" if epi else "movie", "path": virtual, "api_url": api_path, "episode": epi, "info_hash": h, "file_path": file_path, "release_name": release_name, "file_name": name})
+            tv_release = _is_tv_release(
+                os.path.join(virtual_root, safe_release),
+                [_api_file_name(x) for x in files if _api_file_name(x)],
+            )
+            kind = "episode" if epi else ("season_file" if tv_release else "movie")
+            discovered.append({
+                "kind": kind,
+                "path": virtual,
+                "api_url": api_path,
+                "episode": epi,
+                "info_hash": h,
+                "file_path": file_path,
+                "release_name": release_name,
+                "file_name": name,
+            })
 
     return discovered
 
@@ -1607,12 +1621,38 @@ def _quality_full(probe, source_hint=None):
     return " ".join(parts) if parts else "Unknown Quality"
 
 
+def _release_group(value):
+    """Return a conventional trailing release group from the release title."""
+    value = str(value or "").strip()
+    m = TRAILING_GROUP_RE.search(value)
+    if m:
+        return m.group(0).strip()[2:].strip()
+    m = re.search(r"(?i)\s+\[([A-Za-z0-9][A-Za-z0-9._-]{1,30})\]\s*$", value)
+    return m.group(1) if m else ""
+
+
+def _release_source_hint(value):
+    value = str(value or "").lower()
+    if re.search(r"\b(?:bluray|blu[ ._-]?ray|brrip|bd25|bd50|uhd)\b", value):
+        return "bluray"
+    if re.search(r"\b(?:web[ ._-]?dl|webdl|web[ ._-]?rip|webrip)\b", value):
+        return "web"
+    if re.search(r"\b(?:hdtv|pdtv|dsr)\b", value):
+        return "hdtv"
+    return None
+
+
 def _movie_output_name(movie, probe):
-    """Locked normalized movie filename."""
+    """TRaSH-style normalized movie filename."""
     base = movie.name
     if movie.year:
         base += " (%s)" % movie.year
-    return "%s %s" % (base, _quality_full(probe, getattr(movie, "_decypharr_source_hint", None)))
+    quality = _quality_full(probe, getattr(movie, "_decypharr_source_hint", None))
+    group = _release_group(getattr(movie, "_decypharr_release_name", ""))
+    suffix = "[%s]" % quality
+    if group:
+        suffix += "-%s" % group
+    return "%s %s" % (base, suffix)
 
 
 def _episode_air_date(epdata, ep):
@@ -1642,23 +1682,28 @@ def _episode_air_date(epdata, ep):
 
     return "TBA"
 
-def _episode_output_name(series, ep, epdata, probe, source_hint=None):
-    """Locked normalized TV filename."""
+def _episode_output_name(series, ep, epdata, probe, source_hint=None, release_name=None):
+    """TRaSH-style normalized TV filename using SxxExx."""
     series_name = series.name
-    air_date = _episode_air_date(epdata, ep)
+    if getattr(series, "year", None):
+        series_name += " (%s)" % series.year
     episode_name = (
         (epdata or {}).get("name")
         or getattr(ep, "name", None)
         or "Episode %02d" % int(ep.episode_number)
     )
-
-    base = "%s - %s - %s" % (
+    base = "%s - S%02dE%02d - %s" % (
         series_name,
-        air_date,
+        int(ep.season_number),
+        int(ep.episode_number),
         episode_name,
     )
-
-    return "%s %s" % (base, _quality_full(probe, source_hint))
+    quality = _quality_full(probe, source_hint)
+    suffix = "[%s]" % quality
+    group = _release_group(release_name)
+    if group:
+        suffix += "-%s" % group
+    return "%s %s" % (base, suffix)
 
 
 def _canonical_movie_stream_id(movie):
@@ -1710,6 +1755,12 @@ def _dedupe_discovered_media(media):
                 _series_match_key(release_name),
                 int(season),
                 int(number),
+            )
+        elif kind == "season_file":
+            key = (
+                "season_file",
+                str(item.get("info_hash") or release_name),
+                str(item.get("file_path") or path),
             )
         else:
             key = (
@@ -1768,6 +1819,30 @@ def _scan(plugin):
         media = _discover_media(root, API_BASE_URL, API_TOKEN)
         media = _dedupe_discovered_media(media)
 
+        # Season packs often contain obfuscated child filenames. Assign
+        # deterministic provisional episode numbers; embedded FFprobe
+        # titles remain authoritative when available.
+        season_groups = {}
+        for item in media:
+            if item.get("kind") != "season_file":
+                continue
+            season_groups.setdefault(
+                str(item.get("info_hash") or item.get("release_name") or ""),
+                [],
+            ).append(item)
+
+        for group in season_groups.values():
+            group.sort(key=lambda x: str(x.get("file_path") or x.get("file_name") or ""))
+            season = _release_season(group[0].get("release_name") or "")
+            if season is None:
+                for item in group:
+                    item["kind"] = "movie"
+                continue
+            for number, item in enumerate(group, 1):
+                item["episode"] = (season, number)
+                item["kind"] = "episode"
+                item["season_pack"] = True
+
         LOG.info(
             "Decypharr discovery found %d logical media objects after dedupe",
             len(media),
@@ -1801,6 +1876,19 @@ def _scan(plugin):
 
                     if not series_name:
                         series_name = _release_title(release.name)
+
+                    # Obfuscated season-pack members may carry the real
+                    # SxxExx identity in the container title.
+                    probe = None
+                    if item.get("season_pack"):
+                        probe = _ffprobe(api_media_url, cfg["ffprobe"])
+                        embedded = _parse_episode_structure(
+                            str((probe or {}).get("title") or "")
+                        )
+                        if embedded:
+                            _, embedded_season, embedded_number = embedded
+                            season = embedded_season
+                            number = embedded_number
 
                     year = _year(str(release)) or _year(p)
 
@@ -1904,7 +1992,8 @@ def _scan(plugin):
                     ec = dict(ep.custom_properties or {})
                     ec[MARKER] = True
 
-                    probe = _ffprobe(api_media_url, cfg["ffprobe"])
+                    if probe is None:
+                        probe = _ffprobe(api_media_url, cfg["ffprobe"])
 
                     ec.update({
                         "decypharr_path": p,
@@ -2028,7 +2117,8 @@ def _scan(plugin):
                             ep,
                             epdata,
                             probe,
-                            source_hint,
+                            _release_source_hint(item.get("release_name")) or source_hint,
+                            item.get("release_name"),
                         )
                     )
 
@@ -2070,12 +2160,9 @@ def _scan(plugin):
                         )
                     )
 
-                    if is_blu:
-                        title_source = release.name
-                        name = _release_title(title_source)
-                    else:
-                        title_source = p
-                        name = _title(title_source)
+                    # Release name is authoritative; child filenames may be obfuscated.
+                    title_source = release.name
+                    name = _release_title(title_source)
 
                     year = _year(str(release)) or _year(p)
 
@@ -2175,8 +2262,10 @@ def _scan(plugin):
                     # Locked movie .strm path
                     # ----------------------------------------------------
                     movie._decypharr_source_hint = (
-                        "bluray" if is_blu else None
+                        _release_source_hint(item.get("release_name"))
+                        or ("bluray" if is_blu else None)
                     )
+                    movie._decypharr_release_name = item.get("release_name") or ""
 
                     out_name = _safe(
                         _movie_output_name(
