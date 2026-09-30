@@ -1633,11 +1633,11 @@ def _release_group(value):
 
 def _release_source_hint(value):
     value = str(value or "").lower()
-    if re.search(r"(?:bluray|blu[ ._-]?ray|brrip|bd25|bd50|uhd)", value):
+    if re.search(r"\b(?:bluray|blu[ ._-]?ray|brrip|bd25|bd50|uhd)\b", value):
         return "bluray"
-    if re.search(r"(?:web[ ._-]?dl|webdl|web[ ._-]?rip|webrip)", value):
+    if re.search(r"\b(?:web[ ._-]?dl|webdl|web[ ._-]?rip|webrip)\b", value):
         return "web"
-    if re.search(r"(?:hdtv|pdtv|dsr)", value):
+    if re.search(r"\b(?:hdtv|pdtv|dsr)\b", value):
         return "hdtv"
     return None
 
