@@ -41,6 +41,27 @@
       "default": "/usr/local/bin/ffprobe"
     },
     {
+      "id": "preferred_audio_language",
+      "label": "Preferred Audio Language",
+      "type": "select",
+      "default": "eng",
+      "options": [
+        {"value": "eng", "label": "English"},
+        {"value": "spa", "label": "Spanish"},
+        {"value": "fra", "label": "French"},
+        {"value": "deu", "label": "German"},
+        {"value": "ita", "label": "Italian"},
+        {"value": "por", "label": "Portuguese"},
+        {"value": "jpn", "label": "Japanese"},
+        {"value": "kor", "label": "Korean"},
+        {"value": "zho", "label": "Chinese"},
+        {"value": "hin", "label": "Hindi"},
+        {"value": "ara", "label": "Arabic"},
+        {"value": "original", "label": "Source Default / First Available"}
+      ],
+      "help_text": "Preferred audio language when multiple tracks exist. If unavailable, the source default track is used, then the first available track. Direct-play sources are not remuxed just to change the default."
+    },
+    {
       "id": "scan_interval",
       "label": "Auto Scan Interval (seconds)",
       "type": "number",
