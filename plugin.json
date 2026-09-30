@@ -47,6 +47,34 @@
       "default": 60
     },
     {
+      "id": "fast_initial_scan",
+      "label": "Fast Initial Scan",
+      "type": "boolean",
+      "default": true,
+      "help_text": "Build the playable catalog first without remote FFprobe/TMDB probing. Metadata, genres, artwork and technical details are enriched afterward in small background batches."
+    },
+    {
+      "id": "metadata_batch_size",
+      "label": "Metadata Enrichment Batch Size",
+      "type": "number",
+      "default": 10,
+      "help_text": "Titles enriched per background pass. Lower values minimize impact on active VOD playback."
+    },
+    {
+      "id": "progressive_batch_size",
+      "label": "Progressive Import Batch Size",
+      "type": "number",
+      "default": 200,
+      "help_text": "Number of discovered media items imported at a time during the initial scan."
+    },
+    {
+      "id": "api_workers",
+      "label": "Decypharr API Workers",
+      "type": "number",
+      "default": 4,
+      "help_text": "Parallel Decypharr inventory requests. Lower values reduce network pressure on active playback."
+    },
+    {
       "id": "transcode_info",
       "label": "About Browser Transcoding",
       "type": "info",
