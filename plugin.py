@@ -19,7 +19,7 @@ try:
 except ImportError:  # pragma: no cover - Dispatcharr runs on Linux
     fcntl = None
 
-from django.db import transaction
+from django.db import transaction, close_old_connections
 from django.http import FileResponse, Http404, HttpResponse, StreamingHttpResponse
 from django.urls import path
 from django.utils import timezone
@@ -2161,6 +2161,7 @@ def _scan_process_unlock(handle):
 def _auto_scan_loop(plugin):
     LOG.info("Decypharr VOD: background auto-scan worker started.")
     while not AUTO_SCAN_STOP.is_set():
+        close_old_connections()
         settings = _fresh_plugin_settings()
         if settings:
             plugin._settings = settings
@@ -2176,6 +2177,8 @@ def _auto_scan_loop(plugin):
                     LOG.warning("Decypharr VOD: background scan returned %s", result)
             except Exception:
                 LOG.exception("Decypharr VOD: background scan failed")
+            finally:
+                close_old_connections()
             wait_for = max(5, interval)
         else:
             wait_for = 30
@@ -3549,6 +3552,13 @@ class Plugin:
         _account()
         _patch_transcode()
         _start_auto_scan(self)
+
+    def stop(self, context=None):
+        AUTO_SCAN_STOP.set()
+        thread = AUTO_SCAN_THREAD
+        if thread is not None and thread.is_alive() and thread is not threading.current_thread():
+            thread.join(timeout=2)
+        LOG.info("Decypharr VOD: background auto-scan worker stop requested.")
 
     def run(self, action, params, context):
         self._settings = (context or {}).get("settings") or getattr(self, "_settings", {}) or {}
