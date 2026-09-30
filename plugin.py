@@ -3863,6 +3863,47 @@ def _tx_kill_matching(tag):
     return total
 
 
+def _tx_audio_reorder_needed(info, preferred):
+    """Return True when browser playback would expose the wrong default/first audio track."""
+    tracks = list(info.get("audio_tracks") or [])
+    if len(tracks) < 2 or not preferred:
+        return False
+    preferred_index = preferred.get("index")
+    first = tracks[0]
+    if preferred_index != first.get("index"):
+        return True
+    return not bool(first.get("default"))
+
+
+def _tx_build_remux_cmd(ffmpeg, src_url, audio_tracks, preferred_index, tag=TX_MARK):
+    """Remux without re-encoding, putting the preferred audio track first/default."""
+    ordered = []
+    for track in audio_tracks:
+        if track.get("index") == preferred_index:
+            ordered.insert(0, track)
+        else:
+            ordered.append(track)
+    cmd = [
+        ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin",
+        "-user_agent", TX_UA, "-i", src_url,
+        "-map", "0:v:0",
+    ]
+    for track in ordered:
+        cmd += ["-map", "0:%s?" % int(track["index"])]
+    cmd += [
+        "-c:v", "copy", "-c:a", "copy",
+        "-disposition:a:0", "default",
+    ]
+    for pos in range(1, len(ordered)):
+        cmd += ["-disposition:a:%d" % pos, "0"]
+    cmd += [
+        "-metadata", "comment=" + tag,
+        "-movflags", "+frag_keyframe+empty_moov+default_base_moof",
+        "-f", "mp4", "pipe:1",
+    ]
+    return cmd
+
+
 def _tx_build_cmd(ffmpeg, encoder, cfg, src_url, hdr, audio_index=None, tag=TX_MARK):
     pre, suffix, codec = _tx_encoder_parts(encoder, cfg["vaapi_device"])
     vf = ",".join(["scale=-2:'min(1080,ih)'", TX_TONEMAP if hdr else "format=yuv420p"]) + suffix
@@ -4027,6 +4068,35 @@ def _tx_maybe(request, kwargs):
         LOG.warning("Decypharr VOD: could not probe source for transcoding; using passthrough")
         return None
     needs, reason = _tx_needs_transcode(info, agent)
+    preferred_audio = _preferred_audio_stream(
+        info.get("audio_tracks") or ([info.get("audio")] if info.get("audio") else []),
+        cfg.get("preferred_audio_language") or "eng",
+    )
+    # Browser-compatible files still need a lightweight remux when the selected
+    # language is not already the first/default audio stream. This changes no
+    # codecs and keeps every source audio track available.
+    if not needs and _tx_audio_reorder_needed(info, preferred_audio):
+        audio_tracks = list(info.get("audio_tracks") or [])
+        if audio_tracks and preferred_audio and preferred_audio.get("index") is not None:
+            tag = "%s|%s|%s|" % (TX_MARK, _tx_client_ip(request), content_id)
+            src_url = source_url("vodremux")
+            remux_cmd = _tx_build_remux_cmd(
+                ffmpeg, src_url, audio_tracks, preferred_audio.get("index"), tag
+            )
+            proc, first, err = _tx_spawn(remux_cmd)
+            if proc:
+                LOG.info(
+                    "Decypharr VOD: browser audio remux started (preferred=%s, source_tracks=%d)",
+                    preferred_audio.get("language"), len(audio_tracks),
+                )
+                response = StreamingHttpResponse(_tx_iter(proc, first), status=200, content_type="video/mp4")
+                response["Accept-Ranges"] = "none"
+                response["Cache-Control"] = "no-store"
+                response["X-Accel-Buffering"] = "no"
+                return response
+            LOG.warning("Decypharr VOD: preferred-audio remux failed; using native passthrough: %s", err)
+        if not cached:
+            LOG.warning("Decypharr VOD: preferred audio could not be remuxed; using native passthrough")
     if not needs:
         if not cached:
             LOG.info(
@@ -4061,10 +4131,6 @@ def _tx_maybe(request, kwargs):
         # Last resort for ffmpeg builds without the tone-mapping filters:
         # washed-out colours are better than no picture.
         attempts.append((encoders[-1], False))
-    preferred_audio = _preferred_audio_stream(
-        info.get("audio_tracks") or ([info.get("audio")] if info.get("audio") else []),
-        cfg.get("preferred_audio_language") or "eng",
-    )
     preferred_audio_index = preferred_audio.get("index") if preferred_audio else None
     for encoder, use_tonemap in attempts:
         cmd = _tx_build_cmd(ffmpeg, encoder, cfg, src_url, use_tonemap, preferred_audio_index, tag)
