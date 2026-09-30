@@ -1,6 +1,6 @@
 # Decypharr VOD for Dispatcharr
 
-**Version:** 0.5.1
+**Version:** 0.5.2
 **Author:** Tw1zT3d2four7
 
 Decypharr VOD is a Dispatcharr plugin that imports media managed by **Decypharr** into Dispatcharr as native VOD content.
@@ -122,19 +122,19 @@ After installation, restart Dispatcharr if required by the plugin manager.
 
 The plugin provides the following settings.
 
-| Setting             | Description                                                   |
-| ------------------- | ------------------------------------------------------------- |
-| Decypharr API URL   | Base URL of the Decypharr API                                 |
-| Decypharr API Token | Authentication token used for Decypharr API requests          |
-| Normalized Library  | Local directory used for generated `.strm` presentation files |
-| TMDB API Key        | Optional TMDB API key                                         |
-| TMDB Metadata       | Enables/disables TMDB metadata                                |
-| FFprobe Path        | Path to the FFprobe executable                                |
-| Auto Scan Interval  | Automatic scan interval in seconds                            |
+| Setting | Description |
+| --- | --- |
+| Decypharr API URL | Base URL of the Decypharr API |
+| Decypharr API Token | Authentication token used for Decypharr API requests |
+| Normalized Library | Local directory used for generated `.strm` presentation files |
+| TMDB API Key | Optional TMDB API key |
+| TMDB Metadata | Enables/disables TMDB metadata |
+| FFprobe Path | Path to the FFprobe executable |
+| Auto Scan Interval | Automatic scan interval in seconds |
 | Browser Transcoding | Enables H.264/AAC transcoding for the Dispatcharr web player (off by default) |
-| Transcode Encoder   | Auto-detect, NVIDIA, Intel (QSV), AMD/Intel (VAAPI), or CPU only |
-| VAAPI / QSV Device  | Render device used by Intel QSV and VAAPI (default `/dev/dri/renderD128`) |
-| FFmpeg Path         | Path to the FFmpeg executable (default `/usr/local/bin/ffmpeg`) |
+| Transcode Encoder | Auto-detect, NVIDIA, Intel (QSV), AMD/Intel (VAAPI), or CPU only |
+| VAAPI / QSV Device | Render device used by Intel QSV and VAAPI (default `/dev/dri/renderD128`) |
+| FFmpeg Path | Path to the FFmpeg executable (default `/usr/local/bin/ffmpeg`) |
 | Max Simultaneous Transcodes | Upper limit on concurrent browser transcodes (default 2) |
 
 Example:
@@ -592,9 +592,9 @@ The plugin uses canonical logical identities and deduplication to prevent repeat
 
 ---
 
-# Version 0.5.1
+# Version 0.5.2
 
-Version 0.5.1 uses the authenticated Decypharr API as its media discovery source.
+Version 0.5.2 is the current release line.
 
 Key characteristics:
 
