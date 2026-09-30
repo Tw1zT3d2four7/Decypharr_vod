@@ -1,6 +1,6 @@
 # Decypharr VOD for Dispatcharr
 
-**Version:** 0.5.2
+**Version:** 1.0.0
 **Author:** Tw1zT3d2four7
 
 Decypharr VOD is a Dispatcharr plugin that imports media managed by **Decypharr** into Dispatcharr as native VOD content.
@@ -23,7 +23,9 @@ Decypharr VOD provides:
 * Optional TMDB metadata
 * Automatic library cleanup
 * Duplicate protection
-* Automatic scanning
+* Reliable background automatic scanning
+* TMDB genre-based VOD categories
+* Active synthetic XC account with guarded refresh
 * Integration repair
 * Optional browser transcoding (NVIDIA, Intel, AMD, or CPU)
 * No Emby dependency
@@ -592,7 +594,78 @@ The plugin uses canonical logical identities and deduplication to prevent repeat
 
 ---
 
-# Version 0.5.2
+
+
+# Version 1.0.0 Changes
+
+## TMDB Genre Categories
+
+When TMDB metadata is enabled, every genre returned for a movie or series is converted
+into a Dispatcharr VOD category. Categories are created automatically when first
+encountered and reused on later scans.
+
+A movie or series with multiple TMDB genres is linked to each matching category without
+creating duplicate Movie or Series objects. The old generic Decypharr Movies and
+Decypharr TV categories are no longer used by v1.0.0.
+
+## Synthetic XC Account
+
+The synthetic XC account remains **active** because Dispatcharr's native VOD relation
+and proxy layer requires a usable XC account. It is still not a real upstream provider.
+
+v1.0.0 installs guards around Dispatcharr's normal XC refresh tasks. A user Refresh on
+this synthetic account is intercepted and returns a successful no-op instead of trying
+to contact the placeholder local server. The plugin's Scan Now and background scanner
+remain responsible for the VOD inventory.
+
+## Reliable Automatic Scanning
+
+The Auto Scan Interval is backed by a real background worker inside Dispatcharr.
+
+The worker checks the Decypharr API inventory at the configured interval and calculates
+a stable inventory signature. If nothing changed, the import pipeline is skipped. When
+media is added, removed, or changed, the same processing pipeline used by Scan Now runs
+automatically.
+
+Only one scan may run at a time, including across separate Dispatcharr workers.
+**Scan Now** remains available and forces an immediate scan.
+
+This means newly added Decypharr media no longer requires a manual Scan Now to enter the
+Dispatcharr VOD collection, provided the background worker is running.
+
+# Version 1.0.0
+
+Version 1.0.0 is the current release line.
+
+Key characteristics:
+
+* API-based media discovery
+* Decypharr authentication
+* Browse-by-path release resolution
+* API-backed playback
+* Server-side authentication
+* Token-free `.strm` presentation
+* Native Dispatcharr VOD integration
+* Movie and TV support
+* Blu-ray/M2TS handling
+* Logical deduplication
+* FFprobe metadata
+* Optional TMDB metadata
+* Normalized library cleanup
+* Scan locking
+* Repair action
+* Optional browser transcoding with hardware auto-detection
+
+---
+
+# Design Philosophy
+
+Decypharr owns the media.
+
+Dispatcharr owns the VOD presentation.
+
+Decypharr VOD connects the two through a normalized, API-backed presentation layer.
+
 
 Version 0.5.2 is the current release line.
 
