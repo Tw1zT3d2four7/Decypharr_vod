@@ -2050,6 +2050,89 @@ def _media_size(path):
         return 0
 
 
+def _normalize_season_pack_items(media):
+    """
+    Resolve season-pack items before any fast import or movie fallback.
+
+    A Decypharr release can contain obfuscated child filenames (for example
+    numbered .m2ts files) that have no SxxExx marker.  Those items are marked
+    as season_file during discovery.  They must never be allowed to fall
+    through the movie path simply because FFprobe/TMDB has not run yet.
+
+    The release's explicit season marker is authoritative.  If it is absent,
+    use an already-classified episode from the same release when available.
+    Only then assign deterministic episode numbers to the remaining members.
+    Unresolved TV-looking items stay season_file and are deferred.
+    """
+    groups = {}
+
+    for item in media:
+        if item.get("kind") != "season_file":
+            continue
+
+        key = str(
+            item.get("info_hash")
+            or item.get("release_name")
+            or _release_root(item.get("path") or "", SOURCE_ROOT)
+        )
+        groups.setdefault(key, []).append(item)
+
+    for group in groups.values():
+        group.sort(
+            key=lambda x: str(
+                x.get("file_path")
+                or x.get("file_name")
+                or x.get("path")
+                or ""
+            )
+        )
+
+        season = _release_season(group[0].get("release_name") or "")
+
+        if season is None:
+            # Some releases have explicit SxxExx members mixed with
+            # obfuscated members. Reuse the season from those members.
+            for candidate in media:
+                if str(candidate.get("info_hash") or "") != str(
+                    group[0].get("info_hash") or ""
+                ):
+                    continue
+                epi = candidate.get("episode")
+                if epi:
+                    season = int(epi[0])
+                    break
+
+        if season is None:
+            # Do NOT turn an unresolved TV release into a movie.
+            continue
+
+        # Preserve explicit episode numbers if present and assign the
+        # remaining season-pack members deterministically around them.
+        used = {
+            int(item["episode"][1])
+            for item in group
+            if item.get("episode") and int(item["episode"][0]) == int(season)
+        }
+
+        next_number = 1
+        for item in group:
+            if item.get("episode"):
+                item["kind"] = "episode"
+                item["season_pack"] = True
+                continue
+
+            while next_number in used:
+                next_number += 1
+
+            item["episode"] = (int(season), next_number)
+            item["kind"] = "episode"
+            item["season_pack"] = True
+            used.add(next_number)
+            next_number += 1
+
+    return media
+
+
 def _dedupe_discovered_media(media):
     """Collapse duplicate logical discoveries before database processing.
 
@@ -2511,8 +2594,16 @@ def _scan(plugin, force=False, background=False, fast=False, enrich_only=False):
         def progressive_batch(batch):
             if not progressive_fast or enrich_only:
                 return
+
+            # Only import classifications that are already structurally
+            # certain.  season_file entries require the complete release
+            # inventory before episode numbers can be assigned, so they are
+            # deliberately deferred until _discover_media() has finished.
             batch = _dedupe_discovered_media(batch)
             for item in batch:
+                if item.get("kind") == "season_file":
+                    continue
+
                 try:
                     _fast_import_item(
                         account,
@@ -2540,6 +2631,42 @@ def _scan(plugin, force=False, background=False, fast=False, enrich_only=False):
         media = _dedupe_discovered_media(media)
 
         if progressive_fast and not enrich_only:
+            # Now that the complete inventory is known, resolve season packs
+            # before importing the deferred TV items.  This is intentionally
+            # after discovery so a release cannot be split across progressive
+            # batches and assigned the wrong episode numbers.
+            media = _normalize_season_pack_items(media)
+
+            deferred_seen = {
+                "movies": progressive_seen["movies"],
+                "episodes": progressive_seen["episodes"],
+                "series": progressive_seen["series"],
+                "series_relations": progressive_seen["series_relations"],
+                "files": progressive_seen["files"],
+            }
+
+            for item in media:
+                if item.get("kind") != "episode" or item.get("path") in (None, ""):
+                    continue
+                if os.path.realpath(str(item.get("path"))) in progressive_seen["files"]:
+                    continue
+                try:
+                    _fast_import_item(
+                        account,
+                        item,
+                        lib,
+                        deferred_seen["files"],
+                        deferred_seen["movies"],
+                        deferred_seen["episodes"],
+                        deferred_seen["series"],
+                        deferred_seen["series_relations"],
+                    )
+                except Exception:
+                    LOG.exception(
+                        "Decypharr VOD: deferred season-pack import failed for %s",
+                        item.get("path"),
+                    )
+
             inventory_signature = _inventory_signature(media)
             _cleanup_library(lib, progressive_seen["files"])
             M3UMovieRelation.objects.filter(m3u_account=account).exclude(
@@ -2666,26 +2793,7 @@ def _scan(plugin, force=False, background=False, fast=False, enrich_only=False):
         # Season packs often contain obfuscated child filenames. Assign
         # deterministic provisional episode numbers; embedded FFprobe
         # titles remain authoritative when available.
-        season_groups = {}
-        for item in media:
-            if item.get("kind") != "season_file":
-                continue
-            season_groups.setdefault(
-                str(item.get("info_hash") or item.get("release_name") or ""),
-                [],
-            ).append(item)
-
-        for group in season_groups.values():
-            group.sort(key=lambda x: str(x.get("file_path") or x.get("file_name") or ""))
-            season = _release_season(group[0].get("release_name") or "")
-            if season is None:
-                for item in group:
-                    item["kind"] = "movie"
-                continue
-            for number, item in enumerate(group, 1):
-                item["episode"] = (season, number)
-                item["kind"] = "episode"
-                item["season_pack"] = True
+        media = _normalize_season_pack_items(media)
 
         LOG.info(
             "Decypharr discovery found %d logical media objects after dedupe",
@@ -3024,6 +3132,17 @@ def _scan(plugin, force=False, background=False, fast=False, enrich_only=False):
                 # MOVIE
                 # ========================================================
                 else:
+                    # A TV-looking release whose season/episode identity is
+                    # still unresolved must never be silently converted into
+                    # a movie.  Leave it pending for a later enrichment pass.
+                    if item.get("kind") == "season_file":
+                        counts["skipped"] += 1
+                        LOG.warning(
+                            "Deferring unresolved TV/season-pack item instead of importing as movie: %s",
+                            p,
+                        )
+                        continue
+
                     release = _release_root(p, root)
 
                     release_files = []
