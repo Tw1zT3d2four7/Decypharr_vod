@@ -563,11 +563,9 @@ Do not continue scanning until the reported verification result is understood. T
 
 # Version
 
-This branch is **v1.0.1**.
+This release is **v1.0.1**.
 
-All versioned plugin metadata and documentation in this branch should remain at **1.0.1 / v1.0.1** until a deliberate version bump is made.
-
-`main` is not modified by this branch.
+All plugin code, metadata, and documentation in this release are aligned to **1.0.1 / v1.0.1**.
 
 
 ## Large Usenet-Style Library Scanner
