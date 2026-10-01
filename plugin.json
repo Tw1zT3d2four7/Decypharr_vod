@@ -1,6 +1,6 @@
 {
   "name": "Decypharr VOD",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Imports Decypharr media as native Dispatcharr VOD with a normalized .strm library, TMDB genre categories, reliable background scanning, refresh protection for the synthetic XC account, FFprobe metadata, artwork, and optional hardware-accelerated browser transcoding.",
   "author": "Tw1zT3d2four7",
   "fields": [
