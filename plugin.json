@@ -1,7 +1,7 @@
 {
   "name": "Decypharr VOD",
-  "version": "1.0.5",
-  "description": "v1.0.5: Native Dispatcharr VOD for Decypharr with one canonical relation per media item and source-identity continuity across title/path renames.",
+  "version": "1.0.6",
+  "description": "v1.0.6: Native Dispatcharr VOD for Decypharr with one canonical relation per media item, source-identity continuity across title/path renames, and optional season-continuous playback metadata.",
   "author": "Tw1zT3d2four7",
   "fields": [
     {"id":"api_url","label":"Decypharr API URL","type":"string","default":"http://192.168.1.11:8282"},
@@ -16,6 +16,7 @@
     {"id":"metadata_batch_size","label":"Metadata Enrichment Batch Size","type":"number","default":10},
     {"id":"progressive_batch_size","label":"Progressive Import Batch Size","type":"number","default":200},
     {"id":"api_workers","label":"Decypharr API Workers","type":"number","default":4},
+    {"id":"continuous_season_playback","label":"Continuous Season Playback","type":"boolean","default":false,"help_text":"Expose ordered next-episode metadata for automatic playback from Season 1 Episode 1 through the last episode of that season. Season boundaries stop automatic progression."},
     {"id":"browser_transcode","label":"Browser Transcoding","type":"boolean","default":false},
     {"id":"transcode_encoder","label":"Transcode Encoder","type":"select","default":"auto","options":[{"value":"auto","label":"Auto-detect"},{"value":"nvenc","label":"NVIDIA NVENC"},{"value":"qsv","label":"Intel Quick Sync"},{"value":"vaapi","label":"AMD / Intel VAAPI"},{"value":"cpu","label":"CPU libx264"}]},
     {"id":"vaapi_device","label":"VAAPI / QSV Render Device","type":"string","default":"/dev/dri/renderD128"},
