@@ -2,6 +2,7 @@
 
 v1.0.3 keeps exactly one VOD relation per logical movie, series, and episode.
 TMDB genres remain metadata/categories and never become additional streams.
+This entry point is part of the v1.0.3 release and exposes the matching core version.
 """
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
