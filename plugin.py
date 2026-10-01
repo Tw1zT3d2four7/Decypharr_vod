@@ -1,6 +1,6 @@
 """Decypharr VOD plugin entry point.
 
-v1.0.1 keeps the existing implementation in _decypharr_vod_core.py and
+v1.0.2 keeps the existing implementation in _decypharr_vod_core.py and
 patches the legacy TMDB genre relation behavior before exposing Plugin.
 Genres remain metadata/categories; they never create additional streams.
 """
@@ -90,7 +90,7 @@ def _sync_episode_genre_relations(
 _core._sync_movie_genre_relations = _sync_movie_genre_relations
 _core._sync_series_genre_relations = _sync_series_genre_relations
 _core._sync_episode_genre_relations = _sync_episode_genre_relations
-_core.Plugin.version = "1.0.1"
+_core.Plugin.version = "1.0.2"
 Plugin = _core.Plugin
 
 __all__ = ["Plugin"]
