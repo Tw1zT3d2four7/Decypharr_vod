@@ -27,7 +27,7 @@ The plugin uses Decypharr's authenticated API for discovery and playback, create
 - Configurable preferred audio language with source-default fallback
 - Optional TMDB metadata, artwork and genre matching
 - TMDB genre-based Dispatcharr VOD categories
-- Multiple TMDB categories per movie or series
+- TMDB genres retained as metadata on the single canonical VOD relation
 - Category/relation reuse to prevent duplicate genre records
 - Duplicate protection and stale-library cleanup
 - Real background automatic scanning
@@ -206,7 +206,7 @@ The token is never written into generated `.strm` files.
 
 # Large Usenet-Style Libraries
 
-v1.0.0 is intended for libraries much larger than a normal IPTV/VOD collection, including large Usenet-style libraries containing many thousands of releases and video files.
+v1.0.1 is intended for libraries much larger than a normal IPTV/VOD collection, including large Usenet-style libraries containing many thousands of releases and video files.
 
 The scanner therefore separates work into several stages:
 
@@ -347,7 +347,7 @@ Movie
 
 The plugin does not depend on the synthetic XC account's `player_api.php` for genre/category discovery.
 
-The old generic `Decypharr Movies` / `Decypharr TV` classification is not the source of TMDB genre categories in v1.0.0.
+The old generic `Decypharr Movies` / `Decypharr TV` classification is not the source of TMDB genre categories in v1.0.1.
 
 ---
 
@@ -385,7 +385,7 @@ Automatic scanning is separate from the synthetic XC provider refresh and does n
 
 # Series Next Episode
 
-v1.0.0 records deterministic next-episode metadata on imported episode relations.
+v1.0.1 records deterministic next-episode metadata on imported episode relations.
 
 For each episode, the plugin can record:
 
