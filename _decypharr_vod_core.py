@@ -1010,6 +1010,36 @@ def _genre_categories(account, data, kind):
     return [(name, _category(account, name, kind)) for name in names]
 
 
+def _purge_legacy_genre_relations(account):
+    """Delete every plugin-owned genre-copy relation for the synthetic account.
+
+    Genre categories are metadata/category records, not VOD relations.  This
+    is deliberately account-wide and ID-format independent so rows created
+    by older releases cannot survive a later scan.
+    """
+    deleted = {}
+    deleted["movie"] = M3UMovieRelation.objects.filter(
+        m3u_account=account,
+        stream_id__contains="genre-",
+    ).delete()[0]
+    deleted["series"] = M3USeriesRelation.objects.filter(
+        m3u_account=account,
+        external_series_id__contains="genre-",
+    ).delete()[0]
+    deleted["episode"] = M3UEpisodeRelation.objects.filter(
+        m3u_account=account,
+        stream_id__contains="genre-",
+    ).delete()[0]
+    total = sum(deleted.values())
+    if total:
+        LOG.warning(
+            "Decypharr VOD: removed %d legacy genre-copy relations "
+            "(movie=%d series=%d episode=%d)",
+            total, deleted["movie"], deleted["series"], deleted["episode"],
+        )
+    return deleted
+
+
 def _genre_relation_queryset(model, account, base_id, content_field, content_obj):
     """Return every legacy genre-copy relation for one canonical content item."""
     # Use the native content FK as the identity. Historical v1.0.1-compatible cleanup handles rows originally created by older versions; the legacy rows used
@@ -2740,6 +2770,7 @@ def _scan(plugin, force=False, background=False, fast=False, enrich_only=False):
             inventory_signature = bytes(progressive_accumulator).hex()
 
             _cleanup_library(lib, progressive_seen["files"])
+            _purge_legacy_genre_relations(account)
             M3UMovieRelation.objects.filter(
                 m3u_account=account
             ).exclude(id__in=progressive_seen["movies"]).delete()
@@ -3387,6 +3418,11 @@ def _scan(plugin, force=False, background=False, fast=False, enrich_only=False):
         # Remove stale normalized .strm files
         # ================================================================
         _cleanup_library(lib, seen_files)
+
+        # Genre copies are never valid VOD streams. Purge them account-wide
+        # after all import/enrichment work has run, regardless of legacy ID
+        # format or whether the corresponding title was touched this pass.
+        _purge_legacy_genre_relations(account)
 
         # ================================================================
         # Remove stale plugin-owned relations
