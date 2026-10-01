@@ -1,8 +1,8 @@
 """Decypharr VOD plugin entry point.
 
-v1.0.3 keeps exactly one VOD relation per logical movie, series, and episode.
+v1.0.4 keeps exactly one VOD relation per logical movie, series, and episode.
 TMDB genres remain metadata/categories and never become additional streams.
-This entry point is part of the v1.0.3 release and exposes the matching core version.
+This entry point is part of the v1.0.4 release and exposes the matching core version.
 """
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
@@ -66,7 +66,7 @@ def _sync_episode_genre_relations(
 _core._sync_movie_genre_relations = _sync_movie_genre_relations
 _core._sync_series_genre_relations = _sync_series_genre_relations
 _core._sync_episode_genre_relations = _sync_episode_genre_relations
-_core.Plugin.version = "1.0.3"
+_core.Plugin.version = "1.0.4"
 Plugin = _core.Plugin
 
 __all__ = ["Plugin"]
