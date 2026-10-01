@@ -1213,15 +1213,43 @@ def _patch_refresh_guards():
         return False
 
 
+def _movie_match_key(value):
+    """Canonical identity key for movie matching across renamed punctuation."""
+    value = str(value or "")
+    # Normalize Unicode apostrophes/quotes and punctuation so a rename such as
+    # "Movie: The Beginning" -> "Movie - The Beginning" does not create a
+    # second Dispatcharr Movie object.
+    value = value.replace("’", "'").replace("‘", "'").replace("“", '"').replace("”", '"')
+    value = re.sub(r"(?i)(?<=\\w)['’]s\\b", "s", value)
+    value = re.sub(r"['\`\\"\\:;]+", " ", value)
+    value = re.sub(r"[._]+", " ", value)
+    value = re.sub(r"[-–—]+", " ", value)
+    value = re.sub(r"[^\\w]+", " ", value, flags=re.UNICODE)
+    return re.sub(r"\\s+", " ", value).strip().casefold()
+
 def _find_movie(name, year, tmdb_id=None):
     qs = Movie.objects.all()
+
+    # TMDB is the strongest identity when available.
     if tmdb_id:
         x = qs.filter(tmdb_id=tmdb_id).first()
-        if x: return x
-    n = _norm(name)
-    exact = [x for x in qs if _norm(x.name) == n]
-    same = [x for x in exact if year and x.year == year]
-    return (same or exact or [None])[0]
+        if x:
+            return x
+
+    key = _movie_match_key(name)
+    candidates = [x for x in qs if _movie_match_key(x.name) == key]
+
+    # Prefer an exact year match. If the source was renamed and one side has
+    # no year, retain the existing object rather than creating a duplicate.
+    if year:
+        same_year = [x for x in candidates if x.year == year]
+        if same_year:
+            return same_year[0]
+    if candidates:
+        no_year = [x for x in candidates if not x.year or not year]
+        return (no_year or candidates)[0]
+
+    return None
 
 
 def _series_match_key(value):
