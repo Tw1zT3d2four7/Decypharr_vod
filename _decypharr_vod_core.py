@@ -1026,6 +1026,7 @@ def _genre_relation_queryset(model, account, base_id, content_field, content_obj
     if model is M3UMovieRelation:
         historical = qs.filter(
             stream_id__contains="--genre-",
+        ).filter(
             stream_id__contains=base_id,
         )
     elif model is M3UEpisodeRelation:
@@ -1036,6 +1037,7 @@ def _genre_relation_queryset(model, account, base_id, content_field, content_obj
     else:
         historical = qs.filter(
             external_series_id__contains="-genre-",
+        ).filter(
             external_series_id__contains=base_id,
         )
 
