@@ -16,7 +16,7 @@ _spec.loader.exec_module(_core)
 
 
 def _sync_movie_genre_relations(account, movie, base_rel, genre_categories):
-    """Keep exactly one movie relation; genres are metadata, not streams."""
+    """Keep exactly one movie relation; genres are metadata/categories."""
     names = [name for name, category in genre_categories if category]
     categories = [category for name, category in genre_categories if category]
     props = dict(base_rel.custom_properties or {})
@@ -26,26 +26,20 @@ def _sync_movie_genre_relations(account, movie, base_rel, genre_categories):
     base_rel.custom_properties = props
     base_rel.save(update_fields=["category", "custom_properties"])
 
-    # v1.0.1 created one extra M3UMovieRelation per TMDB genre, producing
-    # streams such as decypharr--movie-1458700--genre-action. Remove those
-    # legacy rows whenever the canonical movie is processed.
     marked = _core.M3UMovieRelation.objects.filter(
-        m3u_account=account,
-        movie=movie,
+        m3u_account=account, movie=movie,
         custom_properties__decypharr_genre_relation=True,
     ).exclude(id=base_rel.id)
     legacy = _core.M3UMovieRelation.objects.filter(
-        m3u_account=account,
+        m3u_account=account, movie=movie,
         stream_id__contains="--genre-",
-    ).filter(
-        stream_id__contains=base_rel.stream_id,
     ).exclude(id=base_rel.id)
     (marked | legacy).distinct().delete()
     return [base_rel.id]
 
 
 def _sync_series_genre_relations(account, series, base_rel, genre_categories):
-    """Keep exactly one series relation; genres are metadata, not streams."""
+    """Keep exactly one series relation; genres are metadata/categories."""
     names = [name for name, category in genre_categories if category]
     categories = [category for name, category in genre_categories if category]
     props = dict(base_rel.custom_properties or {})
@@ -56,15 +50,12 @@ def _sync_series_genre_relations(account, series, base_rel, genre_categories):
     base_rel.save(update_fields=["category", "custom_properties"])
 
     marked = _core.M3USeriesRelation.objects.filter(
-        m3u_account=account,
-        series=series,
+        m3u_account=account, series=series,
         custom_properties__decypharr_genre_relation=True,
     ).exclude(id=base_rel.id)
     legacy = _core.M3USeriesRelation.objects.filter(
-        m3u_account=account,
+        m3u_account=account, series=series,
         external_series_id__contains="-genre-",
-    ).filter(
-        external_series_id__contains=base_rel.external_series_id,
     ).exclude(id=base_rel.id)
     (marked | legacy).distinct().delete()
     return [(names[0], base_rel)] if names else [(None, base_rel)]
@@ -82,18 +73,17 @@ def _sync_episode_genre_relations(
     base_rel.save(update_fields=["custom_properties"])
 
     marked = _core.M3UEpisodeRelation.objects.filter(
-        m3u_account=account,
-        episode=episode,
+        m3u_account=account, episode=episode,
         custom_properties__decypharr_genre_relation=True,
     ).exclude(id=base_rel.id)
     legacy = _core.M3UEpisodeRelation.objects.filter(
-        m3u_account=account,
+        m3u_account=account, episode=episode,
         stream_id__contains="--genre-",
-    ).filter(
-        stream_id__contains=base_rel.stream_id,
     ).exclude(id=base_rel.id)
     (marked | legacy).distinct().delete()
     seen_eps.add(base_rel.id)
+
+
 
 
 # Patch the functions in the module where Plugin.run/scan resolves globals.
