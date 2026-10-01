@@ -4,14 +4,14 @@
   <img src="logo.png" alt="Decypharr VOD" width="240">
 </p>
 
-**Version:** 1.0.3  
+**Version:** 1.0.4  
 **Author:** Tw1zT3d2four7
 
 Decypharr VOD imports media managed by **Decypharr** into Dispatcharr as native VOD content.
 
 This release enforces a strict **one-canonical-relation rule**: each movie, series, and episode has one VOD stream relation. TMDB genres are metadata/categories and do not create additional VOD streams or genre relations.
 
-## v1.0.3 Feature Set
+## v1.0.4 Feature Set
 
 - Authenticated Decypharr API discovery through `/api/browse/__all__`
 - Persistent Decypharr inventory caching
@@ -60,7 +60,7 @@ decypharr--movie-1458700--genre-drama
 decypharr--movie-1458700--genre-adventure
 ```
 
-v1.0.3 adds a hard runtime guard around the Dispatcharr VOD relation save boundary. If a legacy genre relation is attempted for the plugin-owned synthetic account, the save is blocked and logged. Legacy genre relations are also purged so stale records cannot remain in the catalog.
+v1.0.4 adds a hard runtime guard around the Dispatcharr VOD relation save boundary. If a legacy genre relation is attempted for the plugin-owned synthetic account, the save is blocked and logged. Legacy genre relations are also purged so stale records cannot remain in the catalog.
 
 This is intentionally stronger than merely cleaning duplicates after a scan: **legacy genre relations are not valid VOD streams and cannot be recreated by the plugin's guarded relation save path.**
 
@@ -121,7 +121,7 @@ The primary plugin file is:
 plugin.py
 ```
 
-After installation, restart Dispatcharr if required by the plugin manager so the v1.0.3 runtime guard is loaded.
+After installation, restart Dispatcharr if required by the plugin manager so the v1.0.4 runtime guard is loaded.
 
 ## Configuration
 
@@ -335,7 +335,7 @@ The **Clean VOD Database** action is intentionally destructive to Dispatcharr's 
 
 It does **not** delete actual Decypharr media.
 
-For a fresh v1.0.3 test after previous versions have created duplicate genre relations, use **Clean + Verify VOD Database first**, restart Dispatcharr, and then run **Scan Now**.
+For a fresh v1.0.4 test after previous versions have created duplicate genre relations, use **Clean + Verify VOD Database first**, restart Dispatcharr, and then run **Scan Now**.
 
 ## Data Ownership and Cleanup
 
@@ -349,18 +349,18 @@ Cleaning the Dispatcharr VOD database does not delete media from Decypharr.
 
 A movie or episode may have multiple TMDB genre categories, but it must have only one canonical VOD relation.
 
-After installing v1.0.3:
+After installing v1.0.4:
 
 1. Run **Clean + Verify VOD Database**.
-2. Restart Dispatcharr so the v1.0.3 plugin entry point and relation guard are loaded.
+2. Restart Dispatcharr so the v1.0.4 plugin entry point and relation guard are loaded.
 3. Run **Scan Now**.
 4. Check the Dispatcharr logs for:
 
 ```text
-Decypharr VOD v1.0.3 BLOCKED legacy genre relation
+Decypharr VOD v1.0.4 BLOCKED legacy genre relation
 ```
 
-If that message appears, v1.0.3 has caught an attempted legacy genre relation at the relation-save boundary rather than allowing it to become another playable stream.
+If that message appears, v1.0.4 has caught an attempted legacy genre relation at the relation-save boundary rather than allowing it to become another playable stream.
 
 ### New media does not appear automatically
 
