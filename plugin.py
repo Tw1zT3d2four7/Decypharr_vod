@@ -37,6 +37,7 @@ def _sync_movie_genre_relations(account, movie, base_rel, genre_categories):
     legacy = _core.M3UMovieRelation.objects.filter(
         m3u_account=account,
         stream_id__contains="--genre-",
+    ).filter(
         stream_id__contains=base_rel.stream_id,
     ).exclude(id=base_rel.id)
     (marked | legacy).distinct().delete()
@@ -62,6 +63,7 @@ def _sync_series_genre_relations(account, series, base_rel, genre_categories):
     legacy = _core.M3USeriesRelation.objects.filter(
         m3u_account=account,
         external_series_id__contains="-genre-",
+    ).filter(
         external_series_id__contains=base_rel.external_series_id,
     ).exclude(id=base_rel.id)
     (marked | legacy).distinct().delete()
@@ -87,6 +89,7 @@ def _sync_episode_genre_relations(
     legacy = _core.M3UEpisodeRelation.objects.filter(
         m3u_account=account,
         stream_id__contains="--genre-",
+    ).filter(
         stream_id__contains=base_rel.stream_id,
     ).exclude(id=base_rel.id)
     (marked | legacy).distinct().delete()
