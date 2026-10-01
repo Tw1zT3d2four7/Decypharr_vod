@@ -503,7 +503,7 @@ def _tmdb(api_key, endpoint, params):
     cached = _json_cache(key)
     if cached is not None:
         return cached
-    req = urllib.request.Request(url, headers={"User-Agent": "Decypharr-VOD/1.0.0"})
+    req = urllib.request.Request(url, headers={"User-Agent": "Decypharr-VOD/1.0.1"})
     for attempt in range(3):
         try:
             with urllib.request.urlopen(req, timeout=15) as r:
@@ -712,7 +712,7 @@ def _proxy_api_file(request, api_url):
 
     headers = {
         "Authorization": "Bearer %s" % api_token,
-        "User-Agent": "Dispatcharr-Decypharr-VOD/1.0.0",
+        "User-Agent": "Dispatcharr-Decypharr-VOD/1.0.1",
     }
     rng = request.headers.get("Range")
     if rng:
@@ -878,7 +878,7 @@ def _patch_relations():
                     headers["Authorization"] = "Bearer %s" % token
                     headers.setdefault(
                         "User-Agent",
-                        "Dispatcharr-Decypharr-VOD/1.0.0",
+                        "Dispatcharr-Decypharr-VOD/1.0.1",
                     )
 
                     LOG.info(
@@ -1010,135 +1010,120 @@ def _genre_categories(account, data, kind):
     return [(name, _category(account, name, kind)) for name in names]
 
 
-def _sync_movie_genre_relations(account, movie, base_rel, genre_categories):
-    """
-    Represent every TMDB genre as a Dispatcharr category relation while
-    keeping one canonical Movie object.  Dispatcharr's relation schema has
-    one category FK per relation, so additional category copies use unique
-    provider relation IDs and point at the same canonical Movie.
-    """
-    names = [name for name, category in genre_categories if category]
-    categories = [category for name, category in genre_categories if category]
-    props = dict(base_rel.custom_properties or {})
-    props["decypharr_genres"] = names
-    props[MARKER] = True
+def _genre_relation_queryset(model, account, base_id, content_field, content_obj):
+    """Return legacy genre-copy relations for one canonical content item."""
+    qs = model.objects.filter(m3u_account=account)
 
-    if categories:
-        base_rel.category = categories[0]
-    else:
-        base_rel.category = None
-    base_rel.custom_properties = props
-    base_rel.save(update_fields=["category", "custom_properties"])
+    # Newer legacy rows carry an explicit marker.
+    marked = qs.filter(
+        custom_properties__decypharr_genre_relation=True,
+        **{content_field: content_obj},
+    )
 
-    relation_ids = [base_rel.id]
-    for name, category in genre_categories[1:]:
-        stream_id = _genre_stream_id(base_rel.stream_id, name)
-        rel, _ = M3UMovieRelation.objects.get_or_create(
-            m3u_account=account,
-            stream_id=stream_id,
-            defaults={
-                "movie": movie,
-                "category": category,
-                "container_extension": base_rel.container_extension,
-                "custom_properties": {},
-            },
+    # Older v1.0.0 rows can predate the marker, so also catch their
+    # historical --genre-* stream/external IDs.  The ID prefix changed
+    # between generations (decypharr--movie-* vs decypharr-movie-*).
+    if model is M3UMovieRelation:
+        historical = qs.filter(
+            stream_id__contains="--genre-",
+            stream_id__contains=base_id,
         )
-        rel.movie = movie
-        rel.category = category
-        rel.container_extension = base_rel.container_extension
-        rp = dict(base_rel.custom_properties or {})
-        rp.update({
-            MARKER: True,
-            "decypharr_genre_relation": True,
-            "decypharr_genre": name,
-        })
-        rel.custom_properties = rp
-        rel.last_seen = timezone.now()
-        rel.save()
-        relation_ids.append(rel.id)
-    return relation_ids
+    elif model is M3UEpisodeRelation:
+        historical = qs.filter(
+            stream_id__contains="--genre-",
+            stream_id__contains=base_id,
+        )
+    else:
+        historical = qs.filter(
+            external_series_id__contains="-genre-",
+            external_series_id__contains=base_id,
+        )
+
+    return (marked | historical).exclude(id=getattr(content_obj, "id", None)).distinct()
 
 
-def _sync_series_genre_relations(account, series, base_rel, genre_categories):
+def _sync_movie_genre_relations(account, movie, base_rel, genre_categories):
+    """Keep one canonical movie relation; genres are metadata/category data."""
     names = [name for name, category in genre_categories if category]
     categories = [category for name, category in genre_categories if category]
+
     props = dict(base_rel.custom_properties or {})
-    props["decypharr_genres"] = names
     props[MARKER] = True
+    props["decypharr_genres"] = names
     base_rel.category = categories[0] if categories else None
     base_rel.custom_properties = props
     base_rel.save(update_fields=["category", "custom_properties"])
 
-    relations = [(names[0], base_rel)] if names else [(None, base_rel)]
-    for name, category in genre_categories[1:]:
-        external_id = "%s-genre-%s" % (base_rel.external_series_id, _genre_slug(name))
-        rel, _ = M3USeriesRelation.objects.get_or_create(
-            m3u_account=account,
-            external_series_id=external_id,
-            defaults={
-                "series": series,
-                "category": category,
-                "custom_properties": {},
-            },
-        )
-        rel.series = series
-        rel.category = category
-        rp = dict(base_rel.custom_properties or {})
-        rp.update({
-            MARKER: True,
-            "decypharr_genre_relation": True,
-            "decypharr_genre": name,
-        })
-        rel.custom_properties = rp
-        rel.last_episode_refresh = timezone.now()
-        rel.save()
-        relations.append((name, rel))
-    return relations
+    # Never create one relation per genre.  Remove both the marked legacy
+    # rows and the older ID-based rows, regardless of which ID generation
+    # produced them.
+    canonical = base_rel.stream_id
+    _genre_relation_queryset(
+        M3UMovieRelation,
+        account,
+        canonical,
+        "movie",
+        movie,
+    ).delete()
+
+    return [base_rel.id]
+
+
+def _sync_series_genre_relations(account, series, base_rel, genre_categories):
+    """Keep one canonical series relation; genres are metadata/category data."""
+    names = [name for name, category in genre_categories if category]
+    categories = [category for name, category in genre_categories if category]
+
+    props = dict(base_rel.custom_properties or {})
+    props[MARKER] = True
+    props["decypharr_genres"] = names
+    base_rel.category = categories[0] if categories else None
+    base_rel.custom_properties = props
+    base_rel.save(update_fields=["category", "custom_properties"])
+
+    canonical = base_rel.external_series_id
+    _genre_relation_queryset(
+        M3USeriesRelation,
+        account,
+        canonical,
+        "series",
+        series,
+    ).delete()
+
+    return [(names[0], base_rel)] if names else [(None, base_rel)]
 
 
 def _sync_episode_genre_relations(
-    account, episode, base_rel, series_relations, path, api_url, item, probe, season, number, seen_eps
+    account,
+    episode,
+    base_rel,
+    series_relations,
+    path,
+    api_url,
+    item,
+    probe,
+    season,
+    number,
+    seen_eps,
 ):
-    for name, series_rel in series_relations:
-        if series_rel.id == base_rel.series_relation_id:
-            continue
-        stream_id = _genre_stream_id(base_rel.stream_id, name)
-        er, _ = M3UEpisodeRelation.objects.get_or_create(
-            m3u_account=account,
-            stream_id=stream_id,
-            defaults={
-                "episode": episode,
-                "series_relation": series_rel,
-                "container_extension": base_rel.container_extension,
-                "custom_properties": {},
-            },
-        )
-        er.episode = episode
-        er.series_relation = series_rel
-        er.container_extension = base_rel.container_extension
-        ep_props = dict(base_rel.custom_properties or {})
-        ep_props.update({
-            MARKER: True,
-            "decypharr_genre_relation": True,
-            "decypharr_genre": name,
-            "decypharr_path": path,
-            "decypharr_api_url": api_url,
-            "decypharr_info_hash": item.get("info_hash"),
-            "decypharr_file_path": item.get("file_path"),
-            "ffprobe": probe,
-                        "preferred_audio_language": _preferred_audio_code(_fresh_plugin_settings()),
-                        "preferred_audio_stream": (probe or {}).get("preferred_audio"),
-                        "preferred_audio_language": _preferred_audio_code(_fresh_plugin_settings()),
-                        "preferred_audio_stream": (probe or {}).get("preferred_audio"),
-                        "preferred_audio_language": _preferred_audio_code(_fresh_plugin_settings()),
-                        "preferred_audio_stream": (probe or {}).get("preferred_audio"),
-            "season_number": season,
-            "episode_number": number,
-        })
-        er.custom_properties = ep_props
-        er.last_seen = timezone.now()
-        er.save()
-        seen_eps.add(er.id)
+    """Keep one canonical episode relation; genres are metadata only."""
+    names = [name for name, _ in series_relations if name]
+    props = dict(base_rel.custom_properties or {})
+    props[MARKER] = True
+    props["decypharr_genres"] = names
+    base_rel.custom_properties = props
+    base_rel.save(update_fields=["custom_properties"])
+
+    canonical = base_rel.stream_id
+    _genre_relation_queryset(
+        M3UEpisodeRelation,
+        account,
+        canonical,
+        "episode",
+        episode,
+    ).delete()
+
+    seen_eps.add(base_rel.id)
 
 
 def _cleanup_legacy_categories(account):
@@ -1655,7 +1640,7 @@ def _tv_blu_ray_episode_candidates(files):
 def _api_json(url, token, params=None, timeout=30):
     q = urllib.parse.urlencode(params or {})
     full = url + (("&" if "?" in url else "?") + q if q else "")
-    req = urllib.request.Request(full, headers={"Authorization": "Bearer %s" % token, "Accept": "application/json", "User-Agent": "Dispatcharr-Decypharr-VOD/1.0.0"})
+    req = urllib.request.Request(full, headers={"Authorization": "Bearer %s" % token, "Accept": "application/json", "User-Agent": "Dispatcharr-Decypharr-VOD/1.0.1"})
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.loads(r.read().decode("utf-8"))
 
@@ -4310,7 +4295,7 @@ def _tx_test(cfg):
 
 class Plugin:
     name = "Decypharr VOD"
-    version = "1.0.0"
+    version = "1.0.1"
     description = "Imports Decypharr media as native Dispatcharr VOD with .strm presentation, FFprobe technical metadata, and optional TMDB metadata."
     author = "Tw1zT3d2four7"
     fields = [
