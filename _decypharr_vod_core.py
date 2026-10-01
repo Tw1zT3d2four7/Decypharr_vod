@@ -1216,17 +1216,14 @@ def _patch_refresh_guards():
 def _movie_match_key(value):
     """Canonical identity key for movie matching across renamed punctuation."""
     value = str(value or "")
-    # Normalize Unicode apostrophes/quotes and punctuation so a rename such as
-    # "Movie: The Beginning" -> "Movie - The Beginning" does not create a
-    # second Dispatcharr Movie object.
+    # Treat punctuation-only title changes as the same logical movie.
     value = value.replace("’", "'").replace("‘", "'").replace("“", '"').replace("”", '"')
-    value = re.sub(r"(?i)(?<=\\w)['’]s\\b", "s", value)
-    value = re.sub(r"['\`\\"\\:;]+", " ", value)
+    value = re.sub(r"(?i)(?<=\w)['’]s\b", "s", value)
+    value = re.sub(r"""['\`"\:;]+""", " ", value)
     value = re.sub(r"[._]+", " ", value)
     value = re.sub(r"[-–—]+", " ", value)
-    value = re.sub(r"[^\\w]+", " ", value, flags=re.UNICODE)
-    return re.sub(r"\\s+", " ", value).strip().casefold()
-
+    value = re.sub(r"[^\w]+", " ", value, flags=re.UNICODE)
+    return re.sub(r"\s+", " ", value).strip().casefold()
 def _find_movie(name, year, tmdb_id=None):
     qs = Movie.objects.all()
 
