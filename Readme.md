@@ -4,7 +4,7 @@
   <img src="logo.png" alt="Decypharr VOD" width="240">
 </p>
 
-**Version:** 1.0.0
+**Version:** 1.0.1
 **Author:** Tw1zT3d2four7
 
 Decypharr VOD imports media managed by **Decypharr** into Dispatcharr as native VOD content.
@@ -13,7 +13,7 @@ The plugin uses Decypharr's authenticated API for discovery and playback, create
 
 ---
 
-## v1.0.0 Feature Set
+## v1.0.1 Feature Set
 
 - Authenticated Decypharr API discovery through `/api/browse/__all__`
 - Persistent Decypharr inventory caching
@@ -541,7 +541,7 @@ If the plugin is actively scanning, playback should still use the existing VOD c
 
 ## A series episode is classified as a movie
 
-Check the release name and whether it contains an identifiable `SxxEyy`, `NxN`, season marker, or release-level season identity. v1.0.0 intentionally avoids converting unresolved `season_file` content into Movies during the fast pass.
+Check the release name and whether it contains an identifiable `SxxEyy`, `NxN`, season marker, or release-level season identity. v1.0.1 intentionally avoids converting unresolved `season_file` content into Movies during the fast pass.
 
 ## Synthetic XC Refresh reports a connection error
 
@@ -563,16 +563,16 @@ Do not continue scanning until the reported verification result is understood. T
 
 # Version
 
-This branch is **v1.0.0**.
+This branch is **v1.0.1**.
 
-All versioned plugin metadata and documentation in this branch should remain at **1.0.0 / v1.0.0** until a deliberate version bump is made.
+All versioned plugin metadata and documentation in this branch should remain at **1.0.1 / v1.0.1** until a deliberate version bump is made.
 
 `main` is not modified by this branch.
 
 
 ## Large Usenet-Style Library Scanner
 
-v1.0.0 is designed for very large Usenet-style Decypharr libraries. The initial scan uses a **true progressive, bounded-memory import path**: releases are classified independently, season packs are resolved before their batch is emitted, and playable Dispatcharr VOD records are created without retaining the complete media inventory in Python memory.
+v1.0.1 is designed for very large Usenet-style Decypharr libraries. The initial scan uses a **true progressive, bounded-memory import path**: releases are classified independently, season packs are resolved before their batch is emitted, and playable Dispatcharr VOD records are created without retaining the complete media inventory in Python memory.
 
 The progressive path no longer performs a second whole-library season-pack pass. Each release is normalized before it reaches the import callback, preventing obfuscated season-pack files from being misclassified as movies while also avoiding a full-library deferred list.
 
