@@ -1,6 +1,6 @@
 # Contributing to Decypharr VOD Plugin
 
-**Release line:** v1.0.3
+**Release line:** v1.0.4
 
 Thank you for your interest in contributing to the Decypharr VOD Plugin for Dispatcharr.
 
@@ -52,9 +52,9 @@ Before submitting a pull request:
 7. Update `CHANGELOG.md` when appropriate.
 8. Submit the pull request with a clear description.
 
-## v1.0.3 VOD Relation Rule
+## v1.0.4 VOD Relation Rule
 
-The v1.0.3 release requires exactly one canonical Dispatcharr VOD relation for each logical movie, series, and episode.
+The v1.0.4 release requires exactly one canonical Dispatcharr VOD relation for each logical movie, series, and episode.
 
 TMDB genres are metadata/categories only. They must not create additional playable VOD relations. Contributions affecting VOD relation creation, metadata enrichment, category assignment, or scanning must preserve this invariant.
 
