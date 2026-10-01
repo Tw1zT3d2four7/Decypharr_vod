@@ -2,14 +2,16 @@
 
 <p align="center"><img src="logo.png" alt="Decypharr VOD" width="240"></p>
 
-**Version:** 1.0.5  
+**Version:** 1.0.6  
 **Author:** Tw1zT3d2four7
 
 Decypharr VOD imports Decypharr media into Dispatcharr as native VOD content.
 
-## v1.0.5
+## v1.0.6
 
-v1.0.5 keeps one canonical VOD relation per logical movie, series, and episode and adds **source-identity continuity across title/path renames**.
+v1.0.6 keeps one canonical VOD relation per logical movie, series, and episode and preserves **source identity across title/path renames**.
+
+It also adds the **Continuous Season Playback** setting. When enabled, the plugin maintains deterministic next-episode metadata from the first episode through the last episode of the same season. The final episode is explicitly marked as the season boundary so playback does not silently jump into the next season.
 
 When Decypharr changes a title such as:
 
@@ -25,8 +27,6 @@ Movie - The Thing
 
 the importer uses the existing Decypharr source identity (`info_hash`, with `file_path` as a secondary identity) to reuse the existing Dispatcharr object rather than treating the renamed title as a new movie or series.
 
-The current title/path is then represented by the current generated `.strm`. Normal scan cleanup removes stale generated presentation files because they are plugin-owned representations, not source media.
-
 ### VOD relation rule
 
 TMDB genres are metadata/categories only. They never become separate playable VOD relations.
@@ -37,13 +37,27 @@ TMDB genres are metadata/categories only. They never become separate playable VO
 decypharr-movie-1458700
 ```
 
-and not separate relations such as:
+and not separate genre relations.
+
+## Continuous Season Playback
+
+The plugin UI contains:
 
 ```text
-decypharr--movie-1458700--genre-action
-decypharr--movie-1458700--genre-drama
-decypharr--movie-1458700--genre-adventure
+Continuous Season Playback: ON / OFF
 ```
+
+When enabled, the plugin exposes ordered next-episode metadata for:
+
+```text
+S01E01 → S01E02 → S01E03 → ... → S01E(last)
+```
+
+The last episode of the season is marked as the season final. The feature is deliberately season-scoped; it does not automatically jump from S01E(last) into S02E01.
+
+The plugin already maintains this next-episode relationship data for the VOD relations. The setting controls whether that metadata is exposed for continuous-playback use.
+
+**Important:** Dispatcharr's current native frontend player must consume the next-episode metadata for a browser/player-level automatic transition. The plugin cannot force a stock Dispatcharr frontend `<video>` element to change its source when playback ends solely from server-side plugin code. The v1.0.6 plugin therefore provides the complete ordered relationship and setting without pretending that server-side metadata alone changes the native frontend behavior.
 
 ## Scan flow
 
@@ -65,6 +79,8 @@ Write current .strm representation
 Remove stale generated representations
      ↓
 TMDB / FFprobe enrichment
+     ↓
+Link next episode metadata when Continuous Season Playback is enabled
 ```
 
 This is intentionally identity-driven rather than trying to discover the old movie by searching for the newly renamed filename after the rename has already occurred.
@@ -94,11 +110,11 @@ Primary entry point:
 plugin.py
 ```
 
-Restart Dispatcharr after installing or upgrading so the v1.0.5 runtime is loaded.
+Restart Dispatcharr after installing or upgrading so the v1.0.6 runtime is loaded.
 
 ## Configuration
 
-The plugin supports Decypharr API settings, normalized library location, TMDB metadata, FFprobe, preferred audio language, automatic scanning, progressive importing, API workers, browser transcoding, hardware encoder selection, render-device selection, FFmpeg, and maximum simultaneous transcodes.
+The plugin supports Decypharr API settings, normalized library location, TMDB metadata, FFprobe, preferred audio language, automatic scanning, progressive importing, API workers, **Continuous Season Playback**, browser transcoding, hardware encoder selection, render-device selection, FFmpeg, and maximum simultaneous transcodes.
 
 ## Decypharr API
 
@@ -136,7 +152,7 @@ Allow the complete scan/background enrichment to finish
 
 ## Testing renamed media
 
-To test the v1.0.5 fix, use a title that previously changed punctuation or naming in Decypharr. Verify that:
+Verify that:
 
 1. The existing Dispatcharr Movie/Series object is reused.
 2. Its displayed title follows the current Decypharr title.
