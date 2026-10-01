@@ -1,7 +1,9 @@
-"""Decypharr VOD plugin entry point - v1.0.5.
+"""Decypharr VOD plugin entry point - v1.0.6.
 
 Preserves Decypharr source identity across title/path renames and keeps one
-canonical VOD relation per logical movie, series, and episode.
+canonical VOD relation per logical movie, series, and episode. v1.0.6 adds
+an explicit Continuous Season Playback setting and exposes deterministic
+next-episode metadata for season-order playback.
 """
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
@@ -59,6 +61,7 @@ _IDENTITY_CONTEXT = {"item": None}
 _ORIG_FAST_IMPORT_ITEM = _core._fast_import_item
 _ORIG_FIND_MOVIE = _core._find_movie
 _ORIG_FIND_SERIES = _core._find_series
+_ORIG_LINK_NEXT = getattr(_core, "_link_next_episode_metadata", None)
 
 
 def _source_relation(model, account, item):
@@ -103,10 +106,58 @@ def _fast_import_with_identity(account, item, lib, seen_files, seen_movies, seen
     finally:
         _IDENTITY_CONTEXT["item"] = None
 
+
+def _continuous_playback_enabled():
+    try:
+        from apps.plugins.models import PluginConfig
+        config = PluginConfig.objects.filter(key=_core.PLUGIN_KEY).first()
+        settings = getattr(config, "settings", {}) or {} if config else {}
+        value = settings.get("continuous_season_playback", False)
+        if isinstance(value, str):
+            return value.strip().lower() in ("1", "true", "yes", "on")
+        return bool(value)
+    except Exception:
+        _core.LOG.exception("Decypharr VOD: could not read continuous playback setting")
+        return False
+
+
+def _link_next_episode_metadata_with_setting(account):
+    """Expose next-episode metadata only when the UI setting is enabled."""
+    if _ORIG_LINK_NEXT is None:
+        return
+    if _continuous_playback_enabled():
+        _ORIG_LINK_NEXT(account)
+        return
+
+    # Clear stale next-episode pointers when the feature is disabled.
+    try:
+        for rel in _core.M3UEpisodeRelation.objects.filter(m3u_account=account):
+            props = dict(rel.custom_properties or {})
+            changed = False
+            for key in (
+                "decypharr_next_episode_id",
+                "decypharr_next_episode_uuid",
+                "decypharr_next_season",
+                "decypharr_next_episode",
+            ):
+                if key in props:
+                    props.pop(key, None)
+                    changed = True
+            if props.get("decypharr_season_final") is not True:
+                props["decypharr_season_final"] = True
+                changed = True
+            if changed:
+                rel.custom_properties = props
+                rel.save(update_fields=["custom_properties"])
+    except Exception:
+        _core.LOG.exception("Decypharr VOD: failed clearing continuous playback metadata")
+
+
 _core._find_movie = _find_movie_by_source
 _core._find_series = _find_series_by_source
 _core._fast_import_item = _fast_import_with_identity
-_core.Plugin.version = "1.0.5"
+_core._link_next_episode_metadata = _link_next_episode_metadata_with_setting
+_core.Plugin.version = "1.0.6"
 Plugin = _core.Plugin
 
 __all__ = ["Plugin"]
