@@ -1,229 +1,31 @@
 {
   "name": "Decypharr VOD",
-  "version": "1.0.4",
-  "description": "v1.0.4: Imports Decypharr media as native Dispatcharr VOD with one canonical relation per movie, series, and episode; TMDB genres remain categories/metadata rather than additional streams; includes reliable background scanning, refresh protection for the synthetic XC account, FFprobe metadata, artwork, and optional hardware-accelerated browser transcoding.",
+  "version": "1.0.5",
+  "description": "v1.0.5: Native Dispatcharr VOD for Decypharr with one canonical relation per media item and source-identity continuity across title/path renames.",
   "author": "Tw1zT3d2four7",
   "fields": [
-    {
-      "id": "api_url",
-      "label": "Decypharr API URL",
-      "type": "string",
-      "default": "http://192.168.1.11:8282"
-    },
-    {
-      "id": "api_token",
-      "label": "Decypharr API Token",
-      "type": "string",
-      "default": ""
-    },
-    {
-      "id": "library_root",
-      "label": "Normalized Library",
-      "type": "string",
-      "default": "/data/plugins/decypharr_vod/library"
-    },
-    {
-      "id": "tmdb_api_key",
-      "label": "TMDB API Key",
-      "type": "string",
-      "default": ""
-    },
-    {
-      "id": "metadata_enabled",
-      "label": "TMDB Metadata",
-      "type": "boolean",
-      "default": true
-    },
-    {
-      "id": "ffprobe_path",
-      "label": "FFprobe Path",
-      "type": "string",
-      "default": "/usr/local/bin/ffprobe"
-    },
-    {
-      "id": "preferred_audio_language",
-      "label": "Preferred Audio Language",
-      "type": "select",
-      "default": "eng",
-      "options": [
-        {
-          "value": "eng",
-          "label": "English"
-        },
-        {
-          "value": "spa",
-          "label": "Spanish"
-        },
-        {
-          "value": "fra",
-          "label": "French"
-        },
-        {
-          "value": "deu",
-          "label": "German"
-        },
-        {
-          "value": "ita",
-          "label": "Italian"
-        },
-        {
-          "value": "por",
-          "label": "Portuguese"
-        },
-        {
-          "value": "jpn",
-          "label": "Japanese"
-        },
-        {
-          "value": "kor",
-          "label": "Korean"
-        },
-        {
-          "value": "zho",
-          "label": "Chinese"
-        },
-        {
-          "value": "hin",
-          "label": "Hindi"
-        },
-        {
-          "value": "ara",
-          "label": "Arabic"
-        },
-        {
-          "value": "original",
-          "label": "Source Default / First Available"
-        }
-      ],
-      "help_text": "Preferred audio language when multiple tracks exist. If unavailable, the source default track is used, then the first available track. Direct-play sources are not remuxed just to change the default."
-    },
-    {
-      "id": "scan_interval",
-      "label": "Auto Scan Interval (seconds)",
-      "type": "number",
-      "default": 60
-    },
-    {
-      "id": "fast_initial_scan",
-      "label": "Fast Initial Scan",
-      "type": "boolean",
-      "default": true,
-      "help_text": "Build the playable catalog first without remote FFprobe/TMDB probing. Metadata, genres, artwork and technical details are enriched afterward in small background batches."
-    },
-    {
-      "id": "metadata_batch_size",
-      "label": "Metadata Enrichment Batch Size",
-      "type": "number",
-      "default": 10,
-      "help_text": "Titles enriched per background pass. Lower values minimize impact on active VOD playback."
-    },
-    {
-      "id": "progressive_batch_size",
-      "label": "Progressive Import Batch Size",
-      "type": "number",
-      "default": 200,
-      "help_text": "Number of discovered media items imported at a time during the initial scan."
-    },
-    {
-      "id": "api_workers",
-      "label": "Decypharr API Workers",
-      "type": "number",
-      "default": 4,
-      "help_text": "Parallel Decypharr inventory requests. Lower values reduce network pressure on active playback."
-    },
-    {
-      "id": "transcode_info",
-      "label": "About Browser Transcoding",
-      "type": "info",
-      "help_text": "Browsers cannot play many common files: HEVC/x265, HDR10, and Dolby or DTS audio. In the Dispatcharr web player these start, stall, or freeze even though the stream is healthy. When enabled, the plugin checks each file the web player opens and converts only files the browser cannot play into H.264/AAC on the fly. Files a browser already plays, and every other app (VLC, Emby, Jellyfin, TiviMate, Kodi), are never transcoded. Seeking is limited while transcoding."
-    },
-    {
-      "id": "browser_transcode",
-      "label": "Browser Transcoding",
-      "type": "boolean",
-      "default": false,
-      "help_text": "Only used by the Dispatcharr web player, and only for files the browser cannot play. Off by default."
-    },
-    {
-      "id": "transcode_encoder",
-      "label": "Transcode Encoder",
-      "type": "select",
-      "default": "auto",
-      "options": [
-        {
-          "value": "auto",
-          "label": "Auto-detect (recommended)"
-        },
-        {
-          "value": "nvenc",
-          "label": "NVIDIA (NVENC)"
-        },
-        {
-          "value": "qsv",
-          "label": "Intel (Quick Sync)"
-        },
-        {
-          "value": "vaapi",
-          "label": "AMD / Intel (VAAPI)"
-        },
-        {
-          "value": "cpu",
-          "label": "CPU only (libx264)"
-        }
-      ],
-      "help_text": "Auto tests NVIDIA, Intel, then AMD/VAAPI and falls back to CPU."
-    },
-    {
-      "id": "vaapi_device",
-      "label": "VAAPI / QSV Render Device",
-      "type": "string",
-      "default": "/dev/dri/renderD128"
-    },
-    {
-      "id": "ffmpeg_path",
-      "label": "FFmpeg Path",
-      "type": "string",
-      "default": "/usr/local/bin/ffmpeg"
-    },
-    {
-      "id": "transcode_max_streams",
-      "label": "Max Simultaneous Transcodes",
-      "type": "number",
-      "default": 2
-    }
+    {"id":"api_url","label":"Decypharr API URL","type":"string","default":"http://192.168.1.11:8282"},
+    {"id":"api_token","label":"Decypharr API Token","type":"string","default":""},
+    {"id":"library_root","label":"Normalized Library","type":"string","default":"/data/plugins/decypharr_vod/library"},
+    {"id":"tmdb_api_key","label":"TMDB API Key","type":"string","default":""},
+    {"id":"metadata_enabled","label":"TMDB Metadata","type":"boolean","default":true},
+    {"id":"ffprobe_path","label":"FFprobe Path","type":"string","default":"/usr/local/bin/ffprobe"},
+    {"id":"preferred_audio_language","label":"Preferred Audio Language","type":"select","default":"eng","options":[{"value":"eng","label":"English"},{"value":"spa","label":"Spanish"},{"value":"fra","label":"French"},{"value":"deu","label":"German"},{"value":"ita","label":"Italian"},{"value":"por","label":"Portuguese"},{"value":"jpn","label":"Japanese"},{"value":"kor","label":"Korean"},{"value":"zho","label":"Chinese"},{"value":"hin","label":"Hindi"},{"value":"ara","label":"Arabic"},{"value":"original","label":"Source Default / First Available"}]},
+    {"id":"scan_interval","label":"Auto Scan Interval (seconds)","type":"number","default":60},
+    {"id":"fast_initial_scan","label":"Fast Initial Scan","type":"boolean","default":true},
+    {"id":"metadata_batch_size","label":"Metadata Enrichment Batch Size","type":"number","default":10},
+    {"id":"progressive_batch_size","label":"Progressive Import Batch Size","type":"number","default":200},
+    {"id":"api_workers","label":"Decypharr API Workers","type":"number","default":4},
+    {"id":"browser_transcode","label":"Browser Transcoding","type":"boolean","default":false},
+    {"id":"transcode_encoder","label":"Transcode Encoder","type":"select","default":"auto","options":[{"value":"auto","label":"Auto-detect"},{"value":"nvenc","label":"NVIDIA NVENC"},{"value":"qsv","label":"Intel Quick Sync"},{"value":"vaapi","label":"AMD / Intel VAAPI"},{"value":"cpu","label":"CPU libx264"}]},
+    {"id":"vaapi_device","label":"VAAPI / QSV Render Device","type":"string","default":"/dev/dri/renderD128"},
+    {"id":"ffmpeg_path","label":"FFmpeg Path","type":"string","default":"/usr/local/bin/ffmpeg"},
+    {"id":"transcode_max_streams","label":"Max Simultaneous Transcodes","type":"number","default":2}
   ],
   "actions": [
-    {
-      "id": "scan",
-      "label": "Scan Decypharr",
-      "description": "Scan Decypharr API and update the normalized presentation library. Automatic background scanning also runs at the configured interval.",
-      "button_label": "Scan Now",
-      "button_variant": "filled",
-      "button_color": "blue"
-    },
-    {
-      "id": "repair",
-      "label": "Repair Integration",
-      "description": "Reinstall routes and relation hooks and ensure the synthetic account exists.",
-      "button_label": "Repair",
-      "button_variant": "outlined",
-      "button_color": "gray"
-    },
-    {
-      "id": "transcode_test",
-      "label": "Test Transcoding",
-      "description": "Test which hardware encoders (NVIDIA, Intel, AMD/VAAPI) or the CPU can transcode on this system.",
-      "button_label": "Test",
-      "button_variant": "outlined",
-      "button_color": "gray"
-    },
-    {
-      "id": "vod_database_cleanup",
-      "label": "Clean VOD Database",
-      "description": "Delete the VOD objects and relations, then immediately verify that the VOD tables are empty. The M3U accounts are preserved.",
-      "button_label": "Clean + Verify",
-      "button_variant": "outlined",
-      "button_color": "red"
-    }
+    {"id":"scan","label":"Scan Decypharr","description":"Scan Decypharr API and update the VOD library.","button_label":"Scan Now","button_variant":"filled","button_color":"blue"},
+    {"id":"repair","label":"Repair Integration","description":"Repair native VOD hooks and the synthetic account.","button_label":"Repair","button_variant":"outlined","button_color":"gray"},
+    {"id":"transcode_test","label":"Test Transcoding","description":"Test available hardware encoders and CPU transcoding.","button_label":"Test","button_variant":"outlined","button_color":"gray"},
+    {"id":"vod_database_cleanup","label":"Clean VOD Database","description":"Delete plugin VOD objects and relations and verify the VOD tables are clean.","button_label":"Clean + Verify","button_variant":"outlined","button_color":"red"}
   ]
 }
