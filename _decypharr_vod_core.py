@@ -1027,7 +1027,7 @@ def _genre_relation_queryset(model, account, base_id, content_field, content_obj
         historical = qs.filter(external_series_id__contains="-genre-")
         marked = qs.filter(custom_properties__decypharr_genre_relation=True)
 
-    return (marked | historical).exclude(id=getattr(content_obj, "id", None)).distinct()
+    return (marked | historical).distinct()
 
 
 def _sync_movie_genre_relations(account, movie, base_rel, genre_categories):
