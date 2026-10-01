@@ -4,7 +4,7 @@
   <img src="logo.png" alt="Decypharr VOD" width="240">
 </p>
 
-**Version:** 1.0.1
+**Version:** 1.0.2
 **Author:** Tw1zT3d2four7
 
 Decypharr VOD imports media managed by **Decypharr** into Dispatcharr as native VOD content.
@@ -13,7 +13,7 @@ The plugin uses Decypharr's authenticated API for discovery and playback, create
 
 ---
 
-## v1.0.1 Feature Set
+## v1.0.2 Feature Set
 
 - Authenticated Decypharr API discovery through `/api/browse/__all__`
 - Persistent Decypharr inventory caching
@@ -27,7 +27,7 @@ The plugin uses Decypharr's authenticated API for discovery and playback, create
 - Configurable preferred audio language with source-default fallback
 - Optional TMDB metadata, artwork and genre matching
 - TMDB genre-based Dispatcharr VOD categories
-- TMDB genres retained as metadata on the single canonical VOD relation
+- TMDB genres retained as metadata/categories on the single canonical VOD relation
 - Category/relation reuse to prevent duplicate genre records
 - Duplicate protection and stale-library cleanup
 - Real background automatic scanning
@@ -206,7 +206,7 @@ The token is never written into generated `.strm` files.
 
 # Large Usenet-Style Libraries
 
-v1.0.1 is intended for libraries much larger than a normal IPTV/VOD collection, including large Usenet-style libraries containing many thousands of releases and video files.
+v1.0.2 is intended for libraries much larger than a normal IPTV/VOD collection, including large Usenet-style libraries containing many thousands of releases and video files.
 
 The scanner therefore separates work into several stages:
 
@@ -347,7 +347,7 @@ Movie
 
 The plugin does not depend on the synthetic XC account's `player_api.php` for genre/category discovery.
 
-The old generic `Decypharr Movies` / `Decypharr TV` classification is not the source of TMDB genre categories in v1.0.1.
+The old generic `Decypharr Movies` / `Decypharr TV` classification is not the source of TMDB genre categories in v1.0.2.
 
 ---
 
@@ -385,7 +385,7 @@ Automatic scanning is separate from the synthetic XC provider refresh and does n
 
 # Series Next Episode
 
-v1.0.1 records deterministic next-episode metadata on imported episode relations.
+v1.0.2 records deterministic next-episode metadata on imported episode relations.
 
 For each episode, the plugin can record:
 
@@ -541,7 +541,7 @@ If the plugin is actively scanning, playback should still use the existing VOD c
 
 ## A series episode is classified as a movie
 
-Check the release name and whether it contains an identifiable `SxxEyy`, `NxN`, season marker, or release-level season identity. v1.0.1 intentionally avoids converting unresolved `season_file` content into Movies during the fast pass.
+Check the release name and whether it contains an identifiable `SxxEyy`, `NxN`, season marker, or release-level season identity. v1.0.2 intentionally avoids converting unresolved `season_file` content into Movies during the fast pass.
 
 ## Synthetic XC Refresh reports a connection error
 
@@ -563,14 +563,14 @@ Do not continue scanning until the reported verification result is understood. T
 
 # Version
 
-This release is **v1.0.1**.
+This release is **v1.0.2**.
 
-All plugin code, metadata, and documentation in this release are aligned to **1.0.1 / v1.0.1**.
+All plugin code, metadata, and documentation in this release are aligned to **1.0.2 / v1.0.2**.
 
 
 ## Large Usenet-Style Library Scanner
 
-v1.0.1 is designed for very large Usenet-style Decypharr libraries. The initial scan uses a **true progressive, bounded-memory import path**: releases are classified independently, season packs are resolved before their batch is emitted, and playable Dispatcharr VOD records are created without retaining the complete media inventory in Python memory.
+v1.0.2 is designed for very large Usenet-style Decypharr libraries. The initial scan uses a **true progressive, bounded-memory import path**: releases are classified independently, season packs are resolved before their batch is emitted, and playable Dispatcharr VOD records are created without retaining the complete media inventory in Python memory.
 
 The progressive path no longer performs a second whole-library season-pack pass. Each release is normalized before it reaches the import callback, preventing obfuscated season-pack files from being misclassified as movies while also avoiding a full-library deferred list.
 
