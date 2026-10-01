@@ -1011,35 +1011,21 @@ def _genre_categories(account, data, kind):
 
 
 def _genre_relation_queryset(model, account, base_id, content_field, content_obj):
-    """Return legacy genre-copy relations for one canonical content item."""
-    qs = model.objects.filter(m3u_account=account)
-
-    # Newer legacy rows carry an explicit marker.
-    marked = qs.filter(
-        custom_properties__decypharr_genre_relation=True,
+    """Return every legacy genre-copy relation for one canonical content item."""
+    # Use the native content FK as the identity. Historical v1.0.0 rows used
+    # IDs such as decypharr--movie-1458700--genre-action, while the canonical
+    # relation uses decypharr-movie-1458700. ID-prefix matching alone misses
+    # those rows.
+    qs = model.objects.filter(
+        m3u_account=account,
         **{content_field: content_obj},
     )
-
-    # Older v1.0.0 rows can predate the marker, so also catch their
-    # historical --genre-* stream/external IDs.  The ID prefix changed
-    # between generations (decypharr--movie-* vs decypharr-movie-*).
-    if model is M3UMovieRelation:
-        historical = qs.filter(
-            stream_id__contains="--genre-",
-        ).filter(
-            stream_id__contains=base_id,
-        )
-    elif model is M3UEpisodeRelation:
-        historical = qs.filter(
-            stream_id__contains="--genre-",
-            stream_id__contains=base_id,
-        )
+    if model in (M3UMovieRelation, M3UEpisodeRelation):
+        historical = qs.filter(stream_id__contains="--genre-")
+        marked = qs.filter(custom_properties__decypharr_genre_relation=True)
     else:
-        historical = qs.filter(
-            external_series_id__contains="-genre-",
-        ).filter(
-            external_series_id__contains=base_id,
-        )
+        historical = qs.filter(external_series_id__contains="-genre-")
+        marked = qs.filter(custom_properties__decypharr_genre_relation=True)
 
     return (marked | historical).exclude(id=getattr(content_obj, "id", None)).distinct()
 
@@ -1056,18 +1042,9 @@ def _sync_movie_genre_relations(account, movie, base_rel, genre_categories):
     base_rel.custom_properties = props
     base_rel.save(update_fields=["category", "custom_properties"])
 
-    # Never create one relation per genre.  Remove both the marked legacy
-    # rows and the older ID-based rows, regardless of which ID generation
-    # produced them.
-    canonical = base_rel.stream_id
     _genre_relation_queryset(
-        M3UMovieRelation,
-        account,
-        canonical,
-        "movie",
-        movie,
+        M3UMovieRelation, account, base_rel.stream_id, "movie", movie
     ).delete()
-
     return [base_rel.id]
 
 
@@ -1083,15 +1060,9 @@ def _sync_series_genre_relations(account, series, base_rel, genre_categories):
     base_rel.custom_properties = props
     base_rel.save(update_fields=["category", "custom_properties"])
 
-    canonical = base_rel.external_series_id
     _genre_relation_queryset(
-        M3USeriesRelation,
-        account,
-        canonical,
-        "series",
-        series,
+        M3USeriesRelation, account, base_rel.external_series_id, "series", series
     ).delete()
-
     return [(names[0], base_rel)] if names else [(None, base_rel)]
 
 
@@ -1116,15 +1087,9 @@ def _sync_episode_genre_relations(
     base_rel.custom_properties = props
     base_rel.save(update_fields=["custom_properties"])
 
-    canonical = base_rel.stream_id
     _genre_relation_queryset(
-        M3UEpisodeRelation,
-        account,
-        canonical,
-        "episode",
-        episode,
+        M3UEpisodeRelation, account, base_rel.stream_id, "episode", episode
     ).delete()
-
     seen_eps.add(base_rel.id)
 
 
