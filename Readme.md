@@ -2,16 +2,16 @@
 
 <p align="center"><img src="logo.png" alt="Decypharr VOD" width="240"></p>
 
-**Version:** 1.0.6  
+**Version:** 1.0.7  
 **Author:** Tw1zT3d2four7
 
 Decypharr VOD imports Decypharr media into Dispatcharr as native VOD content.
 
-## v1.0.6
+## v1.0.7
 
-v1.0.6 keeps one canonical VOD relation per logical movie, series, and episode and preserves **source identity across title/path renames**.
+v1.0.7 keeps one canonical VOD relation per logical movie, series, and episode and preserves **source identity across title/path renames**.
 
-It also adds the **Continuous Season Playback** setting. When enabled, the plugin maintains deterministic next-episode metadata from the first episode through the last episode of the same season. The final episode is explicitly marked as the season boundary so playback does not silently jump into the next season.
+It also exposes **Continuous Season Playback** as a real boolean plugin setting. The setting is loaded from `plugin.json` into the runtime `Plugin.fields` schema as well, preventing a manifest/runtime schema mismatch from hiding the control in Dispatcharr versions that render settings from the active Plugin class.
 
 When Decypharr changes a title such as:
 
@@ -55,9 +55,9 @@ S01E01 → S01E02 → S01E03 → ... → S01E(last)
 
 The last episode of the season is marked as the season final. The feature is deliberately season-scoped; it does not automatically jump from S01E(last) into S02E01.
 
-The plugin already maintains this next-episode relationship data for the VOD relations. The setting controls whether that metadata is exposed for continuous-playback use.
+The setting is defined in `plugin.json` and is also copied to the runtime Plugin class by `plugin.py`, so both manifest-driven and runtime-schema-driven Dispatcharr plugin UIs receive the control.
 
-**Important:** Dispatcharr's current native frontend player must consume the next-episode metadata for a browser/player-level automatic transition. The plugin cannot force a stock Dispatcharr frontend `<video>` element to change its source when playback ends solely from server-side plugin code. The v1.0.6 plugin therefore provides the complete ordered relationship and setting without pretending that server-side metadata alone changes the native frontend behavior.
+**Important:** Dispatcharr's current native frontend player must consume the next-episode metadata for a browser/player-level automatic transition. The plugin cannot force a stock Dispatcharr frontend `<video>` element to change its source when playback ends solely from server-side plugin code. The plugin therefore provides the ordered relationship and setting without pretending that server-side metadata alone changes the native frontend behavior.
 
 ## Scan flow
 
@@ -110,7 +110,7 @@ Primary entry point:
 plugin.py
 ```
 
-Restart Dispatcharr after installing or upgrading so the v1.0.6 runtime is loaded.
+Restart or reload Dispatcharr's plugin discovery after installing or upgrading so the v1.0.7 runtime and settings schema are loaded.
 
 ## Configuration
 

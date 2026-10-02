@@ -1,7 +1,7 @@
 {
   "name": "Decypharr VOD",
-  "version": "1.0.6",
-  "description": "v1.0.6: Native Dispatcharr VOD for Decypharr with one canonical relation per media item, source-identity continuity across title/path renames, and optional season-continuous playback metadata.",
+  "version": "1.0.7",
+  "description": "v1.0.7: Native Dispatcharr VOD for Decypharr with one canonical relation per media item, source-identity continuity across title/path renames, and optional season-continuous playback metadata. Runtime settings are loaded directly from this manifest.",
   "author": "Tw1zT3d2four7",
   "fields": [
     {"id":"api_url","label":"Decypharr API URL","type":"string","default":"http://192.168.1.11:8282"},
