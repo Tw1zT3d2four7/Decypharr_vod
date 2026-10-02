@@ -1,182 +1,122 @@
 # Decypharr VOD for Dispatcharr
 
-<p align="center">
-  <img src="logo.png" alt="Decypharr VOD" width="240">
-</p>
+<p align="center"><img src="logo.png" alt="Decypharr VOD" width="240"></p>
 
-**Version:** 1.0.1
+**Version:** 1.0.6  
 **Author:** Tw1zT3d2four7
 
-Decypharr VOD imports media managed by **Decypharr** into Dispatcharr as native VOD content.
+Decypharr VOD imports Decypharr media into Dispatcharr as native VOD content.
 
-The plugin uses Decypharr's authenticated API for discovery and playback, creates a normalized local `.strm` presentation library, and keeps the Decypharr API token server-side.
+## v1.0.6
 
----
+v1.0.6 keeps one canonical VOD relation per logical movie, series, and episode and preserves **source identity across title/path renames**.
 
-## v1.0.1 Feature Set
+It also adds the **Continuous Season Playback** setting. When enabled, the plugin maintains deterministic next-episode metadata from the first episode through the last episode of the same season. The final episode is explicitly marked as the season boundary so playback does not silently jump into the next season.
 
-- Authenticated Decypharr API discovery through `/api/browse/__all__`
-- Persistent Decypharr inventory caching
-- Parallel child-release discovery with configurable API workers
-- Movie, TV episode, season-pack, multi-file and Blu-ray handling
-- Canonical Arr-style title parsing
-- Native Dispatcharr VOD movie, series and episode objects
-- Normalized `.strm` presentation files
-- Decypharr API-backed playback with HTTP Range support
-- FFprobe technical metadata
-- Configurable preferred audio language with source-default fallback
-- Optional TMDB metadata, artwork and genre matching
-- TMDB genre-based Dispatcharr VOD categories
-- TMDB genres retained as metadata on the single canonical VOD relation
-- Category/relation reuse to prevent duplicate genre records
-- Duplicate protection and stale-library cleanup
-- Real background automatic scanning
-- Progressive initial importing so playable catalog entries can appear before the entire scan finishes
-- Fast initial import separated from expensive FFprobe/TMDB enrichment
-- Metadata enrichment in configurable batches
-- Active synthetic XC account required by Dispatcharr VOD relations
-- Protected synthetic-account refresh that returns a successful no-op
-- Repair action
-- Working Clean + Verify VOD Database action
-- Optional browser transcoding using NVIDIA NVENC, Intel QSV, AMD/Intel VAAPI or CPU
-- Deterministic next-episode metadata within the current season
-- No Emby dependency
-
-The plugin does **not** require Dispatcharr to directly access Decypharr's storage layout.
-
----
-
-# Architecture
+When Decypharr changes a title such as:
 
 ```text
-                    ┌──────────────────────┐
-                    │      Decypharr       │
-                    │  /api/browse/...     │
-                    └──────────┬───────────┘
-                               │
-                         Authenticated API
-                               │
-                               ▼
-                    ┌──────────────────────┐
-                    │    Decypharr VOD     │
-                    │       Plugin         │
-                    │ Discover / Normalize │
-                    │ Metadata / Playback  │
-                    └──────────┬───────────┘
-                               │
-                         .strm + metadata
-                               │
-                               ▼
-                    ┌──────────────────────┐
-                    │      Dispatcharr     │
-                    │      Native VOD      │
-                    └──────────┬───────────┘
-                               │
-                            Playback
-                               │
-                               ▼
-                    ┌──────────────────────┐
-                    │ Decypharr API Proxy  │
-                    │ Authenticated Range  │
-                    │       Streaming      │
-                    └──────────────────────┘
+Movie: The Thing
 ```
 
-Generated `.strm` files do **not** contain the Decypharr API token.
+to:
 
----
+```text
+Movie - The Thing
+```
 
-# Requirements
+the importer uses the existing Decypharr source identity (`info_hash`, with `file_path` as a secondary identity) to reuse the existing Dispatcharr object rather than treating the renamed title as a new movie or series.
 
-### Required
+### VOD relation rule
+
+TMDB genres are metadata/categories only. They never become separate playable VOD relations.
+
+`10,000 BC` should have one canonical stream:
+
+```text
+decypharr-movie-1458700
+```
+
+and not separate genre relations.
+
+## Continuous Season Playback
+
+The plugin UI contains:
+
+```text
+Continuous Season Playback: ON / OFF
+```
+
+When enabled, the plugin exposes ordered next-episode metadata for:
+
+```text
+S01E01 → S01E02 → S01E03 → ... → S01E(last)
+```
+
+The last episode of the season is marked as the season final. The feature is deliberately season-scoped; it does not automatically jump from S01E(last) into S02E01.
+
+The plugin already maintains this next-episode relationship data for the VOD relations. The setting controls whether that metadata is exposed for continuous-playback use.
+
+**Important:** Dispatcharr's current native frontend player must consume the next-episode metadata for a browser/player-level automatic transition. The plugin cannot force a stock Dispatcharr frontend `<video>` element to change its source when playback ends solely from server-side plugin code. The v1.0.6 plugin therefore provides the complete ordered relationship and setting without pretending that server-side metadata alone changes the native frontend behavior.
+
+## Scan flow
+
+```text
+Decypharr API
+     ↓
+Discover media
+     ↓
+Resolve stable source identity
+     ↓
+Reuse existing Dispatcharr object when available
+     ↓
+Update current title/path metadata
+     ↓
+Create/update one canonical VOD relation
+     ↓
+Write current .strm representation
+     ↓
+Remove stale generated representations
+     ↓
+TMDB / FFprobe enrichment
+     ↓
+Link next episode metadata when Continuous Season Playback is enabled
+```
+
+This is intentionally identity-driven rather than trying to discover the old movie by searching for the newly renamed filename after the rename has already occurred.
+
+## Requirements
 
 - Dispatcharr
 - Decypharr
-- Decypharr API access
-- Decypharr API token
+- Decypharr API access and token
 - FFprobe
+- Optional TMDB API key
+- Optional FFmpeg/GPU access for browser transcoding
 
-### Optional
+## Installation
 
-- TMDB API key
-- FFmpeg and GPU access when browser transcoding is enabled
+Install through the normal Dispatcharr plugin installation process.
 
----
-
-# Installation
-
-Install the plugin using the normal Dispatcharr plugin installation process.
-
-The plugin is installed under:
+The plugin installs under:
 
 ```text
 /data/plugins/decypharr_vod/
 ```
 
-The primary plugin file is:
+Primary entry point:
 
 ```text
 plugin.py
 ```
 
-After installation, restart Dispatcharr if required by the plugin manager.
+Restart Dispatcharr after installing or upgrading so the v1.0.6 runtime is loaded.
 
----
+## Configuration
 
-# Configuration
+The plugin supports Decypharr API settings, normalized library location, TMDB metadata, FFprobe, preferred audio language, automatic scanning, progressive importing, API workers, **Continuous Season Playback**, browser transcoding, hardware encoder selection, render-device selection, FFmpeg, and maximum simultaneous transcodes.
 
-| Setting | Default | Purpose |
-| --- | --- | --- |
-| Decypharr API URL | `http://192.168.1.11:8282` | Decypharr API base URL |
-| Decypharr API Token | — | Decypharr authentication token |
-| Normalized Library | `/data/plugins/decypharr_vod/library` | Generated `.strm` presentation library |
-| TMDB API Key | — | Optional TMDB API key |
-| TMDB Metadata | Enabled | Enables TMDB metadata and genre categories |
-| FFprobe Path | `/usr/local/bin/ffprobe` | FFprobe executable |
-| Preferred Audio Language | eng (English) | Preferred audio track when multiple tracks exist; falls back to source default, then first available |
-| Auto Scan Interval | 60 seconds | Background inventory scan interval |
-| Fast Initial Scan | Enabled | Prioritizes a playable catalog before expensive enrichment |
-| Metadata Enrichment Batch Size | 10 | Items enriched per background batch |
-| Progressive Import Batch Size | 200 | Items handed to the fast importer per batch |
-| Decypharr API Workers | 4 | Concurrent discovery workers |
-| Browser Transcoding | Disabled | Browser-only H.264/AAC fallback |
-| Transcode Encoder | Auto-detect | NVIDIA, Intel QSV, AMD/VAAPI or CPU |
-| VAAPI / QSV Render Device | `/dev/dri/renderD128` | Intel/AMD render device |
-| FFmpeg Path | `/usr/local/bin/ffmpeg` | FFmpeg executable |
-| Max Simultaneous Transcodes | 2 | Browser transcode concurrency |
-
-For a typical installation:
-
-```text
-Decypharr API URL:
-http://192.168.1.11:8282
-
-Normalized Library:
-/data/plugins/decypharr_vod/library
-```
-
-Paths depend on the Dispatcharr container configuration.
-
----
-
-
-# Preferred Audio Language
-
-**Preferred Audio Language** controls which audio track is selected when a title contains multiple audio streams. The public default is **English (eng)**.
-
-Selection order is:
-
-1. The configured language, when present.
-2. The source's existing default audio track, when the configured language is unavailable.
-3. The first available audio track.
-
-The plugin retains the complete FFprobe audio-track list and records the selected stream in VOD metadata. Direct-play sources are **not** remuxed solely to change their audio default. When browser transcoding is actually required, the selected preferred audio stream is used for the H.264/AAC transcode and marked as the default output audio track.
-
-The setting is configurable for public-plugin users and supports English, Spanish, French, German, Italian, Portuguese, Japanese, Korean, Chinese, Hindi, Arabic, or **Source Default / First Available**.
-
-# Decypharr API Discovery
-
-The plugin uses the Decypharr API rather than directly walking the Decypharr filesystem.
+## Decypharr API
 
 Primary inventory endpoint:
 
@@ -184,398 +124,47 @@ Primary inventory endpoint:
 /api/browse/__all__
 ```
 
-Child release inventories are obtained from their Decypharr browse paths.
+Playback uses the authenticated Decypharr download API. The API token is never written into generated `.strm` files.
 
-Playback uses:
+## Automatic scanning
 
-```text
-/api/browse/download/{torrent}/{file}
-```
+The background scanner runs at the configured interval and uses the same identity-aware import path as **Scan Now**. Scan locking prevents overlapping imports.
 
-The plugin does not assume that an `info_hash` by itself is a valid browse path.
+## TMDB categories
 
-API requests use:
+Multiple TMDB genres may be attached to the same movie or series. Categories are metadata and do not create additional streams.
 
-```http
-Authorization: Bearer <API_TOKEN>
-```
+## Clean + Verify VOD Database
 
-The token is never written into generated `.strm` files.
+This action removes plugin VOD records and verifies the VOD database state without deleting Decypharr source media.
 
----
-
-# Large Usenet-Style Libraries
-
-v1.0.1 is intended for libraries much larger than a normal IPTV/VOD collection, including large Usenet-style libraries containing many thousands of releases and video files.
-
-The scanner therefore separates work into several stages:
+For testing after previous plugin versions have created duplicates:
 
 ```text
-Decypharr inventory
-       ↓
-Persistent release/file cache
-       ↓
-Progressive fast import
-       ↓
-Playable Dispatcharr catalog
-       ↓
-Small metadata batches
-       ↓
-FFprobe / TMDB / artwork / genres
+Clean + Verify VOD Database
+        ↓
+Restart Dispatcharr
+        ↓
+Scan Now
+        ↓
+Allow the complete scan/background enrichment to finish
 ```
 
-### Persistent inventory cache
+## Testing renamed media
 
-The plugin caches release child-file inventories. When Decypharr reports an unchanged release, its previously discovered child inventory can be reused instead of requesting the complete child listing again.
+Verify that:
 
-### Parallel discovery
+1. The existing Dispatcharr Movie/Series object is reused.
+2. Its displayed title follows the current Decypharr title.
+3. Only one canonical VOD relation remains.
+4. The current `.strm` points to the current relation.
+5. The old generated `.strm` disappears after scan reconciliation.
+6. TMDB genres remain categories/metadata instead of becoming streams.
 
-**Decypharr API Workers** controls concurrent child-release API requests. The default is 4. Increase it only when the Decypharr and Dispatcharr hosts remain responsive during scanning and playback.
+## Browser transcoding
 
-### Progressive import
+Browser transcoding is off by default. Supported paths include NVIDIA NVENC, Intel QSV, AMD/Intel VAAPI, and CPU/libx264.
 
-**Progressive Import Batch Size** controls how many discovered objects are handed to the fast importer at a time. The default is 200.
+## License
 
-The purpose is to avoid the old behavior where the user had to wait for the entire library to finish before useful VOD entries appeared.
-
-### Fast initial import
-
-**Fast Initial Scan** is enabled by default. The fast importer creates provisional playable VOD entries before the expensive FFprobe/TMDB enrichment pass completes.
-
-This is specifically intended to allow playback while a large initial scan is still running.
-
-### Metadata batching
-
-**Metadata Enrichment Batch Size** defaults to 10. FFprobe and TMDB operations are deliberately separated from the initial catalog-building pass so a huge library does not create one enormous metadata operation.
-
-### Scan locking
-
-Only one scan may modify the Decypharr VOD catalog at a time. Both an in-process lock and a process lock are used to prevent overlapping scans from corrupting or competing over the same VOD relations.
-
-### Important classification rule
-
-Fast import must never turn an unresolved TV season-pack into a movie merely because TMDB or FFprobe has not run yet.
-
-Season-pack members are grouped by release and given deterministic episode identities when the release contains enough information to establish a season. Unresolved TV-looking `season_file` items are deferred rather than intentionally converted to Movies.
-
----
-
-# Media Classification
-
-The plugin supports:
-
-- Movies
-- Normal `SxxEyy` TV episodes
-- `NxN` episode notation
-- Season-only releases
-- Multi-file releases
-- Blu-ray/M2TS releases
-- Obfuscated season-pack members when release-level information identifies the season
-
-The canonical parser is designed around structural boundaries instead of globally deleting words from filenames.
-
-Technical release tokens such as `1080p`, `WEB-DL`, `BluRay`, `HEVC`, `AAC`, `HDR`, `Atmos`, `Netflix`, and similar tokens are treated as release boundaries rather than blindly stripped from arbitrary title text.
-
----
-
-# Movies
-
-Movies become native Dispatcharr VOD Movie objects.
-
-Example normalized layout:
-
-```text
-library/
-└── movies/
-    └── Movie Name (Year)/
-        └── Movie Name (Year) Quality.strm
-```
-
-The `.strm` points to Dispatcharr's native VOD proxy path rather than exposing the Decypharr credential.
-
----
-
-# TV Shows
-
-TV content becomes native Dispatcharr Series and Episode objects.
-
-Episodes retain season and episode numbers. Episode metadata is fetched locally by the plugin when available so the synthetic XC provider is not required to retrieve episode information.
-
----
-
-# Blu-ray Handling
-
-Blu-ray releases containing M2TS streams are treated as logical releases instead of treating every internal transport stream as a separate movie.
-
-Internal stream names such as numeric M2TS members and `BDMVSTREAM...` entries are not used as movie titles.
-
-For TV Blu-ray releases, usable numbered streams can be assigned deterministic episode order. Small menu/sample/trailer streams are filtered before expensive probing when possible.
-
----
-
-# Duplicate Protection
-
-Logical deduplication occurs before Dispatcharr is updated.
-
-Canonical movie and episode stream IDs prevent repeated scans from creating a new relation for the same logical content.
-
-Existing TMDB genre categories and plugin-owned relations are reused rather than recreated on every scan.
-
----
-
-# TMDB Metadata and Genre Categories
-
-TMDB is optional.
-
-When TMDB metadata is enabled, the plugin can obtain metadata for movies and series, including artwork and genres.
-
-For every TMDB genre:
-
-1. Search for an existing Dispatcharr VOD category using a case-insensitive name match.
-2. Create the category if it does not exist.
-3. Reuse the category on later scans.
-4. Attach the title to every applicable genre category.
-
-A movie or series can therefore belong to multiple categories:
-
-```text
-Movie
-├── Action
-├── Adventure
-└── Science Fiction
-```
-
-The plugin does not depend on the synthetic XC account's `player_api.php` for genre/category discovery.
-
-The old generic `Decypharr Movies` / `Decypharr TV` classification is not the source of TMDB genre categories in v1.0.1.
-
----
-
-# Synthetic XC Account
-
-Dispatcharr's VOD relation/proxy layer requires a usable XC account. Decypharr VOD therefore maintains a synthetic XC account.
-
-The account remains **active**.
-
-It is deliberately **not disabled** and is not converted to STD.
-
-Normal provider refresh behavior is intercepted for the plugin-owned synthetic account because the account does not represent a real upstream XC server.
-
-A protected refresh returns a successful no-op instead of attempting to connect to a placeholder address such as `127.0.0.1:80`.
-
-The refresh guard is installed during plugin load and Repair and is idempotent.
-
-The plugin's Scan Now and automatic scanner remain responsible for the actual Decypharr inventory.
-
----
-
-# Automatic Scanning
-
-**Auto Scan Interval** is backed by a real background worker.
-
-The worker periodically runs the same scan pipeline used by manual scanning. It uses the persistent inventory signature to determine whether work is necessary and uses the scan lock to prevent overlapping scans.
-
-New media can therefore be discovered without pressing **Scan Now**.
-
-**Scan Now** remains available for an immediate scan.
-
-Automatic scanning is separate from the synthetic XC provider refresh and does not require `player_api.php`.
-
----
-
-# Series Next Episode
-
-v1.0.1 records deterministic next-episode metadata on imported episode relations.
-
-For each episode, the plugin can record:
-
-- Next episode relation ID
-- Next episode UUID
-- Next season
-- Next episode number
-- Whether the current episode is the final episode of the season
-
-Automatic next-episode metadata is deliberately limited to the **same season**. The final episode of a season is marked as a season boundary instead of automatically advancing into another season.
-
-This supplies the backend information required for a player to implement:
-
-```text
-Episode finishes
-      ↓
-Another episode in this season?
-   ┌──┴──┐
-  YES    NO
-   ↓      ↓
-Next     Stop at
-episode  season end
-```
-
-The plugin does not claim to replace Dispatcharr's frontend player code. The stored relation metadata is the backend side of the feature.
-
----
-
-# Playback
-
-Generated `.strm` files use Dispatcharr's native VOD proxy path.
-
-Playback flow:
-
-```text
-.strm
-  ↓
-Dispatcharr native VOD proxy
-  ↓
-Decypharr VOD relation
-  ↓
-Authenticated Decypharr download request
-  ↓
-Media stream
-```
-
-HTTP Range requests and relevant upstream headers are forwarded so clients can seek and stream normally.
-
-The Decypharr token remains server-side.
-
----
-
-# Browser Transcoding
-
-Browser transcoding is **off by default**.
-
-When enabled, the plugin can convert browser-incompatible media to H.264/AAC. This is intended for the Dispatcharr web player and does not force other clients such as VLC, Emby, Jellyfin, TiviMate or Kodi through the transcoder.
-
-Supported encoder paths include:
-
-- NVIDIA NVENC
-- Intel Quick Sync (QSV)
-- AMD/Intel VAAPI
-- CPU/libx264
-
-The **Transcode Encoder** setting can be left on Auto-detect.
-
-The plugin cannot grant a Docker container GPU access. Docker Compose must expose the required device/GPU to Dispatcharr.
-
-NVIDIA example:
-
-```yaml
-services:
-  dispatcharr:
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu, video, compute, utility]
-```
-
-Intel/AMD example:
-
-```yaml
-services:
-  dispatcharr:
-    devices:
-      - /dev/dri:/dev/dri
-```
-
----
-
-# Repair
-
-The **Repair Integration** action:
-
-- Reinstalls the plugin's integration hooks.
-- Ensures the synthetic Decypharr XC account exists.
-- Reinstalls the synthetic XC refresh guard.
-- Restores the plugin's expected Dispatcharr integration state.
-
-Repair is safe to run repeatedly.
-
----
-
-# Clean + Verify VOD Database
-
-The **Clean VOD Database** action is intentionally destructive to Dispatcharr's VOD records.
-
-It removes the VOD relations and objects used by the plugin, including:
-
-```text
-vod_m3uepisoderelation
-vod_m3umovierelation
-vod_m3useriesrelation
-vod_m3uvodcategoryrelation
-vod_episode
-vod_movie
-vod_series
-vod_vodcategory
-vod_vodlogo
-```
-
-M3U account records are preserved, including the synthetic Decypharr account.
-
-The action verifies that the VOD object and relation counts are zero before reporting success. If verification fails, the cleanup reports an error rather than claiming that the database was cleaned.
-
-This action does **not** delete the actual Decypharr media.
-
----
-
-# Data Ownership and Cleanup
-
-Decypharr remains the source of truth for the underlying media.
-
-The plugin owns its normalized Dispatcharr representation and plugin-generated `.strm` files.
-
-Normal scans clean up stale plugin-owned `.strm` files and relations. They do not delete the underlying Decypharr media.
-
-The Clean + Verify action is separate and explicitly destructive to Dispatcharr's VOD database records.
-
----
-
-# Troubleshooting
-
-## New media is not visible immediately
-
-Wait for the configured Auto Scan Interval or use **Scan Now**.
-
-If the plugin is actively scanning, playback should still use the existing VOD catalog. The scan lock prevents a second scan from competing with the active scan.
-
-## A series episode is classified as a movie
-
-Check the release name and whether it contains an identifiable `SxxEyy`, `NxN`, season marker, or release-level season identity. v1.0.1 intentionally avoids converting unresolved `season_file` content into Movies during the fast pass.
-
-## Synthetic XC Refresh reports a connection error
-
-Run **Repair Integration**. The plugin installs an idempotent refresh guard for the plugin-owned synthetic account. The account must remain active.
-
-## TMDB categories are missing
-
-Verify that **TMDB Metadata** is enabled and that a valid TMDB API key is configured. TMDB genres are only available when TMDB metadata is enabled and the title is successfully matched.
-
-## Browser playback needs transcoding
-
-Enable **Browser Transcoding**, confirm FFmpeg is available, and verify that the required GPU/device is exposed to the Dispatcharr container if using hardware encoding.
-
-## Clean + Verify reports an error
-
-Do not continue scanning until the reported verification result is understood. The action is designed to fail rather than falsely claim the VOD database is empty.
-
----
-
-# Version
-
-This release is **v1.0.1**.
-
-All plugin code, metadata, and documentation in this release are aligned to **1.0.1 / v1.0.1**.
-
-
-## Large Usenet-Style Library Scanner
-
-v1.0.1 is designed for very large Usenet-style Decypharr libraries. The initial scan uses a **true progressive, bounded-memory import path**: releases are classified independently, season packs are resolved before their batch is emitted, and playable Dispatcharr VOD records are created without retaining the complete media inventory in Python memory.
-
-The progressive path no longer performs a second whole-library season-pack pass. Each release is normalized before it reaches the import callback, preventing obfuscated season-pack files from being misclassified as movies while also avoiding a full-library deferred list.
-
-Fast-import records are placed into a persistent metadata queue. Expensive FFprobe/TMDB enrichment is processed in small batches after the playable catalog is available. This keeps the scan responsive and reduces the chance that a large initial scan interferes with active VOD playback.
-
-The persistent Decypharr API inventory cache reuses unchanged release child inventories, and changed releases are fetched concurrently according to the **Decypharr API Workers** setting. The scanner also folds a compact inventory signature instead of retaining the complete media objects solely to calculate a scan signature.
-
-Automatic scanning, manual Scan Now, metadata enrichment, and stale-library cleanup continue to use the same plugin-owned relations and `.strm` presentation library. A scan lock prevents overlapping scans from modifying the VOD database at the same time.
+See the repository license for the applicable project terms.

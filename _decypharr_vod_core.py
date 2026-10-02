@@ -503,7 +503,7 @@ def _tmdb(api_key, endpoint, params):
     cached = _json_cache(key)
     if cached is not None:
         return cached
-    req = urllib.request.Request(url, headers={"User-Agent": "Decypharr-VOD/1.0.1"})
+    req = urllib.request.Request(url, headers={"User-Agent": "Decypharr-VOD/1.0.2"})
     for attempt in range(3):
         try:
             with urllib.request.urlopen(req, timeout=15) as r:
@@ -712,7 +712,7 @@ def _proxy_api_file(request, api_url):
 
     headers = {
         "Authorization": "Bearer %s" % api_token,
-        "User-Agent": "Dispatcharr-Decypharr-VOD/1.0.1",
+        "User-Agent": "Dispatcharr-Decypharr-VOD/1.0.2",
     }
     rng = request.headers.get("Range")
     if rng:
@@ -878,7 +878,7 @@ def _patch_relations():
                     headers["Authorization"] = "Bearer %s" % token
                     headers.setdefault(
                         "User-Agent",
-                        "Dispatcharr-Decypharr-VOD/1.0.1",
+                        "Dispatcharr-Decypharr-VOD/1.0.2",
                     )
 
                     LOG.info(
@@ -1010,9 +1010,39 @@ def _genre_categories(account, data, kind):
     return [(name, _category(account, name, kind)) for name in names]
 
 
+def _purge_legacy_genre_relations(account):
+    """Delete every plugin-owned genre-copy relation for the synthetic account.
+
+    Genre categories are metadata/category records, not VOD relations.  This
+    is deliberately account-wide and ID-format independent so rows created
+    by older releases cannot survive a later scan.
+    """
+    deleted = {}
+    deleted["movie"] = M3UMovieRelation.objects.filter(
+        m3u_account=account,
+        stream_id__contains="genre-",
+    ).delete()[0]
+    deleted["series"] = M3USeriesRelation.objects.filter(
+        m3u_account=account,
+        external_series_id__contains="genre-",
+    ).delete()[0]
+    deleted["episode"] = M3UEpisodeRelation.objects.filter(
+        m3u_account=account,
+        stream_id__contains="genre-",
+    ).delete()[0]
+    total = sum(deleted.values())
+    if total:
+        LOG.warning(
+            "Decypharr VOD: removed %d legacy genre-copy relations "
+            "(movie=%d series=%d episode=%d)",
+            total, deleted["movie"], deleted["series"], deleted["episode"],
+        )
+    return deleted
+
+
 def _genre_relation_queryset(model, account, base_id, content_field, content_obj):
     """Return every legacy genre-copy relation for one canonical content item."""
-    # Use the native content FK as the identity. Historical v1.0.1-compatible cleanup handles rows originally created by older versions; the legacy rows used
+    # Use the native content FK as the identity. Historical v1.0.2-compatible cleanup handles rows originally created by older versions; the legacy rows used
     # IDs such as decypharr--movie-1458700--genre-action, while the canonical
     # relation uses decypharr-movie-1458700. ID-prefix matching alone misses
     # those rows.
@@ -1183,15 +1213,40 @@ def _patch_refresh_guards():
         return False
 
 
+def _movie_match_key(value):
+    """Canonical identity key for movie matching across renamed punctuation."""
+    value = str(value or "")
+    # Treat punctuation-only title changes as the same logical movie.
+    value = value.replace("’", "'").replace("‘", "'").replace("“", '"').replace("”", '"')
+    value = re.sub(r"(?i)(?<=\w)['’]s\b", "s", value)
+    value = re.sub(r"""['\`"\:;]+""", " ", value)
+    value = re.sub(r"[._]+", " ", value)
+    value = re.sub(r"[-–—]+", " ", value)
+    value = re.sub(r"[^\w]+", " ", value, flags=re.UNICODE)
+    return re.sub(r"\s+", " ", value).strip().casefold()
 def _find_movie(name, year, tmdb_id=None):
     qs = Movie.objects.all()
+
+    # TMDB is the strongest identity when available.
     if tmdb_id:
         x = qs.filter(tmdb_id=tmdb_id).first()
-        if x: return x
-    n = _norm(name)
-    exact = [x for x in qs if _norm(x.name) == n]
-    same = [x for x in exact if year and x.year == year]
-    return (same or exact or [None])[0]
+        if x:
+            return x
+
+    key = _movie_match_key(name)
+    candidates = [x for x in qs if _movie_match_key(x.name) == key]
+
+    # Prefer an exact year match. If the source was renamed and one side has
+    # no year, retain the existing object rather than creating a duplicate.
+    if year:
+        same_year = [x for x in candidates if x.year == year]
+        if same_year:
+            return same_year[0]
+    if candidates:
+        no_year = [x for x in candidates if not x.year or not year]
+        return (no_year or candidates)[0]
+
+    return None
 
 
 def _series_match_key(value):
@@ -1607,7 +1662,7 @@ def _tv_blu_ray_episode_candidates(files):
 def _api_json(url, token, params=None, timeout=30):
     q = urllib.parse.urlencode(params or {})
     full = url + (("&" if "?" in url else "?") + q if q else "")
-    req = urllib.request.Request(full, headers={"Authorization": "Bearer %s" % token, "Accept": "application/json", "User-Agent": "Dispatcharr-Decypharr-VOD/1.0.1"})
+    req = urllib.request.Request(full, headers={"Authorization": "Bearer %s" % token, "Accept": "application/json", "User-Agent": "Dispatcharr-Decypharr-VOD/1.0.2"})
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.loads(r.read().decode("utf-8"))
 
@@ -2740,6 +2795,7 @@ def _scan(plugin, force=False, background=False, fast=False, enrich_only=False):
             inventory_signature = bytes(progressive_accumulator).hex()
 
             _cleanup_library(lib, progressive_seen["files"])
+            _purge_legacy_genre_relations(account)
             M3UMovieRelation.objects.filter(
                 m3u_account=account
             ).exclude(id__in=progressive_seen["movies"]).delete()
@@ -3387,6 +3443,11 @@ def _scan(plugin, force=False, background=False, fast=False, enrich_only=False):
         # Remove stale normalized .strm files
         # ================================================================
         _cleanup_library(lib, seen_files)
+
+        # Genre copies are never valid VOD streams. Purge them account-wide
+        # after all import/enrichment work has run, regardless of legacy ID
+        # format or whether the corresponding title was touched this pass.
+        _purge_legacy_genre_relations(account)
 
         # ================================================================
         # Remove stale plugin-owned relations
@@ -4262,7 +4323,7 @@ def _tx_test(cfg):
 
 class Plugin:
     name = "Decypharr VOD"
-    version = "1.0.1"
+    version = "1.0.2"
     description = "Imports Decypharr media as native Dispatcharr VOD with .strm presentation, FFprobe technical metadata, and optional TMDB metadata."
     author = "Tw1zT3d2four7"
     fields = [

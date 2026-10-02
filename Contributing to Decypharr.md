@@ -1,105 +1,52 @@
 # Contributing to Decypharr VOD Plugin
 
+**Release line:** v1.0.6
+
 Thank you for your interest in contributing to the Decypharr VOD Plugin for Dispatcharr.
 
-Contributions, bug reports, testing, and improvements are welcome.
+## v1.0.6 identity and playback rules
 
-## Before Contributing
+The plugin requires exactly one canonical Dispatcharr VOD relation for each logical movie, series, and episode.
 
-Please check the existing GitHub issues and pull requests before opening a new issue or submitting a change.
+TMDB genres are metadata/categories only and must never become additional playable VOD relations.
 
-For bugs, provide enough information to reproduce the problem without exposing private credentials or personal information.
+The importer must preserve Decypharr source identity across title and path renames. When an existing plugin-owned relation has the same Decypharr source identity, the importer should reuse the existing Dispatcharr Movie or Series object and update its current representation rather than creating a second object from the renamed filename.
 
-## Reporting Bugs
+When **Continuous Season Playback** is enabled, episode relations must expose deterministic next-episode metadata from the first episode through the final episode of the same season. Season boundaries must remain explicit; S01E(last) must not silently advance to S02E01.
 
-When reporting a bug, include:
-
-* Plugin version
-* Dispatcharr version
-* Decypharr version, when relevant
-* Docker deployment information
-* Exact error message
-* Relevant Dispatcharr log output
-* Steps required to reproduce the problem
-* Expected behavior
-* Actual behavior
-
-Do not include passwords, API keys, authentication tokens, private URLs, or other sensitive information.
-
-## Feature Requests
-
-Feature requests are welcome.
-
-Please describe:
-
-1. The problem the feature would solve.
-2. How you expect the feature to work.
-3. Any relevant Dispatcharr or Decypharr behavior.
-4. Potential compatibility considerations.
-
-## Pull Requests
-
-Before submitting a pull request:
-
-1. Fork the repository.
-2. Create a dedicated branch for your change.
-3. Make the smallest practical change required.
-4. Test the change against a working Dispatcharr installation.
-5. Verify that existing functionality continues to work.
-6. Update documentation when behavior changes.
-7. Update `CHANGELOG.md` when appropriate.
-8. Submit the pull request with a clear description.
-
-## Plugin Integrity
-
-Changes should preserve the plugin's self-contained installation model.
-
-Users should not be required to manually:
-
-* Copy files into the Dispatcharr container.
-* Install undocumented dependencies.
-* Create required directories.
-* Modify Dispatcharr source code.
-* Apply undocumented host-side patches.
-
-If a change introduces a new requirement, document it clearly and explain why it is necessary.
-
-## Filesystem Safety
-
-The plugin interacts with user media filesystems.
-
-Contributions must avoid unnecessary modification, deletion, renaming, or movement of user media.
-
-The Decypharr media tree should be treated as user-owned source data.
-
-## Database Safety
-
-Changes affecting Dispatcharr's VOD database should be tested carefully.
-
-Do not introduce destructive database operations without a clear justification and appropriate safeguards.
+Generated `.strm` files are plugin-owned presentation files. Source media in Decypharr must never be deleted by rename reconciliation.
 
 ## Testing
 
-Testing should cover the affected functionality whenever practical.
+Test real-world naming variations including apostrophes, curly apostrophes, colons, dashes, underscores, and source title/path renames.
 
-For scanner changes, test with media containing a variety of real-world naming conventions rather than only perfectly formatted filenames.
+For rename tests verify that:
 
-For filesystem changes, test both:
+1. The existing Dispatcharr object is reused.
+2. The current title is applied.
+3. Only one canonical VOD relation remains.
+4. The current generated `.strm` represents the current source.
+5. The stale generated `.strm` is removed during normal scan cleanup.
+6. TMDB genres remain categories/metadata.
 
-* Fresh plugin installation
-* Existing plugin installation
+For continuous playback tests verify that enabling the setting produces ordered S01E01 → S01E02 → ... → S01E(last) metadata and that the final episode is marked as the season boundary. Do not assume server-side metadata alone changes the stock Dispatcharr browser player; frontend consumption of the next-episode metadata is required for an automatic client-side transition.
 
-For VOD changes, verify both catalog creation and playback.
+For bug reports include plugin version, Dispatcharr version, Decypharr version when relevant, exact error messages, relevant logs, reproduction steps, expected behavior, and actual behavior. Never include passwords, API keys, authentication tokens, or private URLs.
 
-## Code Quality
+## Pull Requests
 
-Keep changes focused and readable.
+Use a dedicated branch, keep changes focused, test against a working Dispatcharr installation, verify existing behavior, and update documentation when behavior changes.
 
-Avoid unnecessary dependencies and unnecessary changes to Dispatcharr itself.
+## Filesystem and database safety
 
-Security, reliability, compatibility, and predictable behavior take priority over unnecessary complexity.
+Decypharr source media is user-owned data. Contributions must not delete or rename source media as part of catalog reconciliation.
+
+Database cleanup must be scoped to plugin-owned VOD records and must have clear safeguards.
+
+## Code quality
+
+Avoid unnecessary dependencies and unnecessary changes to Dispatcharr itself. Security, reliability, compatibility, and predictable behavior take priority over unnecessary complexity.
 
 ## License
 
 By contributing to this project, you agree that your contributions may be distributed under the project's MIT License.
-
