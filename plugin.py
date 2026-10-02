@@ -1,19 +1,31 @@
-"""Decypharr VOD plugin entry point - v1.0.6.
+"""Decypharr VOD plugin entry point - v1.0.7.
 
 Preserves Decypharr source identity across title/path renames and keeps one
-canonical VOD relation per logical movie, series, and episode. v1.0.6 adds
-an explicit Continuous Season Playback setting and exposes deterministic
-next-episode metadata for season-order playback.
+canonical VOD relation per logical movie, series, and episode. v1.0.7 makes
+the manifest settings authoritative at runtime as well, including the
+Continuous Season Playback boolean setting.
 """
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
+import json
 
 _CORE_PATH = Path(__file__).with_name("_decypharr_vod_core.py")
+_MANIFEST_PATH = Path(__file__).with_name("plugin.json")
 _spec = spec_from_file_location("_decypharr_vod_core", _CORE_PATH)
 if _spec is None or _spec.loader is None:
     raise ImportError("Unable to load Decypharr VOD core")
 _core = module_from_spec(_spec)
 _spec.loader.exec_module(_core)
+
+
+def _load_manifest_schema():
+    try:
+        with _MANIFEST_PATH.open("r", encoding="utf-8") as fh:
+            manifest = json.load(fh)
+        return manifest.get("fields", []), manifest.get("actions", [])
+    except Exception:
+        _core.LOG.exception("Decypharr VOD: failed to load plugin.json settings schema")
+        return [], []
 
 
 def _sync_movie_genre_relations(account, movie, base_rel, genre_categories):
@@ -111,7 +123,7 @@ def _continuous_playback_enabled():
     try:
         from apps.plugins.models import PluginConfig
         config = PluginConfig.objects.filter(key=_core.PLUGIN_KEY).first()
-        settings = getattr(config, "settings", {}) or {} if config else {}
+        settings = (getattr(config, "settings", {}) or {}) if config else {}
         value = settings.get("continuous_season_playback", False)
         if isinstance(value, str):
             return value.strip().lower() in ("1", "true", "yes", "on")
@@ -128,8 +140,6 @@ def _link_next_episode_metadata_with_setting(account):
     if _continuous_playback_enabled():
         _ORIG_LINK_NEXT(account)
         return
-
-    # Clear stale next-episode pointers when the feature is disabled.
     try:
         for rel in _core.M3UEpisodeRelation.objects.filter(m3u_account=account):
             props = dict(rel.custom_properties or {})
@@ -153,11 +163,17 @@ def _link_next_episode_metadata_with_setting(account):
         _core.LOG.exception("Decypharr VOD: failed clearing continuous playback metadata")
 
 
+# Make plugin.json authoritative for the actual Plugin class too. This avoids
+# a manifest/class schema mismatch and guarantees the boolean is rendered by
+# Dispatcharr versions that read fields from the runtime Plugin class.
+_MANIFEST_FIELDS, _MANIFEST_ACTIONS = _load_manifest_schema()
+_core.Plugin.fields = _MANIFEST_FIELDS
+_core.Plugin.actions = _MANIFEST_ACTIONS
 _core._find_movie = _find_movie_by_source
 _core._find_series = _find_series_by_source
 _core._fast_import_item = _fast_import_with_identity
 _core._link_next_episode_metadata = _link_next_episode_metadata_with_setting
-_core.Plugin.version = "1.0.6"
+_core.Plugin.version = "1.0.7"
 Plugin = _core.Plugin
 
 __all__ = ["Plugin"]
